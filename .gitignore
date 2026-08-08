@@ -1,0 +1,23 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Local database (structure lives in schema.sql; don't commit real data)
+*.db
+*.sqlite
+*.sqlite3
+
+# Real hand logs (personal data - don't commit real play data by default)
+data/hand_logs/*.csv
+!data/templates/*.csv
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/

@@ -1,0 +1,12 @@
+[project]
+name = "poker-hand-analyzer"
+version = "0.1.0"
+description = "A lightweight tool for live cash game players to log hands, calculate decision EV, and track win rate/variance across sessions."
+requires-python = ">=3.11"
+readme = "README.md"
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra"
