@@ -70,6 +70,19 @@ Use `data/templates/hand_log_template.csv` as the format for manually logging ha
 from live play. Read `data/templates/hand_log_template_GUIDE.md` first - it documents
 every column and the encoding used for actions-by-street and cards.
 
+## CSV validator
+
+Run the validator against a hand-log CSV to check the structure and field formats
+before using it downstream:
+
+```bash
+python src/poker_analyzer/validation/validator.py data/templates/hand_log_template.csv
+```
+
+It reports row/column-specific errors for missing columns, bad dates, malformed card
+fields, invalid position codes, malformed action strings, and blank street fields
+where a street should not be empty.
+
 ## Equity calculator
 
 `src/poker_analyzer/equity/calculator.py` wraps `treys` to compute heads-up equity
@@ -87,6 +100,7 @@ Built so far (this session):
 - [x] Project scaffolding
 - [x] SQLite schema (sessions, hands, actions) - structure only
 - [x] CSV hand-log template + guide
+- [x] CSV validator for hand-log files, with pytest coverage
 - [x] Equity calculator, validated against known spots
 
 Not built yet (later sessions, per the project spec's build phases):
