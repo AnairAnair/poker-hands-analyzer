@@ -35,7 +35,7 @@ from typing import Iterable
 
 from poker_analyzer.validation.validator import validate_hand_log_csv
 
-ACTION_TOKEN_RE = re.compile(r"^(?P<position>[A-Za-z+]+):(?P<type>fold|check|call|bet|raise)(?P<amount>\d+(?:\.\d+)?)?$")
+ACTION_TOKEN_RE = re.compile(r"^(?P<position>[A-Za-z0-9+]+):(?P<type>fold|check|call|bet|raise)(?P<amount>\d+(?:\.\d+)?)?$")
 
 STREET_COLUMNS = {
     "preflop": "preflop_actions",
