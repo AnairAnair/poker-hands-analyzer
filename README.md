@@ -5,8 +5,8 @@ expected value of individual decisions, and aggregate win rate and variance acro
 sessions.
 
 > Status: early scaffolding. Preflop-only EV engine, decision flagging, session
-> aggregation stats, and a unified CLI are built; postflop EV and the dashboard are
-> not - see "Current status" below.
+> aggregation stats, a unified CLI, and a Streamlit dashboard are built; postflop EV
+> and fold equity modeling are not - see "Current status" below.
 
 ## Why this project
 
@@ -22,7 +22,8 @@ framework from messy input) once the tool is far enough along to demo.
 - [treys](https://github.com/ihendley/treys) for hand evaluation and equity calculation
 - [Typer](https://typer.tiangolo.com/) for the CLI
 - [pytest](https://docs.pytest.org/) for tests
-- Streamlit - optional, later phase, for a dashboard
+- [Streamlit](https://streamlit.io/) (with [Altair](https://altair-viz.github.io/) for
+  charts) for the dashboard
 
 ## Project layout
 
@@ -49,8 +50,11 @@ poker-hand-analyzer/
 │       ├── ev/
 │       │   ├── ranges.py             # Chen-formula opponent range assignment
 │       │   └── engine.py             # preflop decision-level EV + +EV/-EV/marginal flagging
-│       └── stats/
-│           └── aggregator.py         # per-session + combined win rate, variance, swings
+│       ├── stats/
+│       │   └── aggregator.py         # per-session + combined win rate, variance, swings
+│       └── dashboard/
+│           ├── data_prep.py          # shapes aggregator/ev-engine output into DataFrames
+│           └── app.py                # Streamlit app - renders data_prep's output, no logic
 ├── scripts/
 │   └── poker_cli.py                  # executable entry point for src/poker_analyzer/cli.py
 └── tests/
@@ -59,7 +63,8 @@ poker-hand-analyzer/
     ├── test_hand_log_validator.py
     ├── test_ingestion.py
     ├── test_ev_engine.py
-    └── test_stats_aggregator.py
+    ├── test_stats_aggregator.py
+    └── test_dashboard_data_prep.py
 ```
 
 ## Setup
@@ -203,6 +208,49 @@ With only 15 hands loaded, none of these numbers - especially bb/100 - are
 statistically meaningful yet; the command prints that caveat alongside the numbers.
 This is a correctness check on the calculation pipeline, not a performance read.
 
+## Dashboard
+
+`src/poker_analyzer/dashboard/` is a Streamlit app that visualizes the same data the
+CLI prints. It computes nothing itself: `dashboard/data_prep.py` shapes DataFrames by
+calling straight into `stats/aggregator.py` and `ev/engine.py` (the same
+wrap-don't-duplicate principle as `cli.py`), and `dashboard/app.py` only renders what
+`data_prep.py` returns.
+
+Launch it from the project root (after `pip install -r requirements.txt`, which now
+includes Streamlit):
+
+```bash
+streamlit run src/poker_analyzer/dashboard/app.py
+```
+
+This opens the dashboard in your browser at `http://localhost:8501`. The sidebar has
+the database path (defaults to `poker_hands.db`) and the equity-simulation trial
+count/seed used for the preflop EV breakdown - lower the trial count for a faster,
+noisier load.
+
+The page has three sections:
+
+- **Result over time** - cumulative bb result and running bb/100 win rate across
+  hands, with a session filter (cumulative totals restart at 0 for a single session,
+  matching how `aggregate_session_stats` scopes its own swing math independently per
+  session - see `data_prep.results_over_time`'s docstring for why filtering a
+  combined series would give the wrong number).
+- **Preflop decisions: +EV / -EV / marginal** - a count/percentage breakdown of every
+  logged preflop decision by `ev/engine.py`'s flag, plus the full per-decision detail
+  table (position, action, equity, EV numbers).
+- **Per-session summary** - one row per session plus a combined row, straight from
+  `aggregate_all` (hands, result, win rate, variance, std dev, swings).
+
+As with `ev-report`, the preflop breakdown re-runs the Monte Carlo equity simulation
+on load, so it takes a few seconds with the default trial count.
+
+`dashboard/data_prep.py`'s data-shaping functions are covered in
+`tests/test_dashboard_data_prep.py`, cross-checked against the same real 15-hand
+database the other modules' tests use. `dashboard/app.py` itself (the Streamlit
+rendering) isn't unit-tested the same way - verified instead by running the app
+against the real database and checking each section against the CLI's
+`stats`/`ev-report` output.
+
 ## Current status
 
 Built so far:
@@ -225,13 +273,16 @@ Built so far:
       and end-to-end runs
 - [x] `ev-report`: the first place the preflop EV engine's output is actually
       printed anywhere (position, action, +EV/-EV/marginal flag, equity/EV numbers)
+- [x] Streamlit dashboard (`dashboard/app.py`) - result-over-time and win-rate
+      charts, preflop +EV/-EV/marginal breakdown, per-session summary table, all
+      wrapping `stats/aggregator.py` and `ev/engine.py` rather than recomputing;
+      data-shaping layer (`dashboard/data_prep.py`) covered by pytest
 
 Not built yet (later sessions, per the project spec's build phases):
 
 - [ ] Postflop EV engine (needs its own dedicated design work - multiway equity,
       board texture, bet sizing all change the range-assignment approach)
 - [ ] Fold equity modeling
-- [ ] Dashboard (pandas + matplotlib, or Streamlit)
 - [ ] Portfolio writeup
 
 ## License

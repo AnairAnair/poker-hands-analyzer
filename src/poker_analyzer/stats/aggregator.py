@@ -53,20 +53,32 @@ class AggregateStats:
     biggest_downswing_bb: float
 
 
+def win_rate_bb_per_100(total_result_bb: float, total_hands: int) -> float:
+    """The standard bb/100 win-rate convention - see the module docstring."""
+    return (total_result_bb / total_hands) * 100 if total_hands else 0.0
+
+
+def cumulative_series(results: list[float]) -> list[float]:
+    """Running cumulative sum of results, in the given order. One entry per result."""
+    cumulative = 0.0
+    series = []
+    for result in results:
+        cumulative += result
+        series.append(cumulative)
+    return series
+
+
 def _compute_stats(label: str, session_id: int | None, results: list[float]) -> AggregateStats:
     total_hands = len(results)
     total_result_bb = sum(results)
-    win_rate_bb_per_100 = (total_result_bb / total_hands) * 100 if total_hands else 0.0
     variance_bb = statistics.variance(results) if total_hands > 1 else 0.0
     std_dev_bb = variance_bb ** 0.5
 
-    cumulative = 0.0
     running_peak = 0.0
     running_trough = 0.0
     max_downswing = 0.0
     max_upswing = 0.0
-    for result in results:
-        cumulative += result
+    for cumulative in cumulative_series(results):
         running_peak = max(running_peak, cumulative)
         running_trough = min(running_trough, cumulative)
         max_downswing = max(max_downswing, running_peak - cumulative)
@@ -77,12 +89,35 @@ def _compute_stats(label: str, session_id: int | None, results: list[float]) -> 
         session_id=session_id,
         total_hands=total_hands,
         total_result_bb=total_result_bb,
-        win_rate_bb_per_100=win_rate_bb_per_100,
+        win_rate_bb_per_100=win_rate_bb_per_100(total_result_bb, total_hands),
         variance_bb=variance_bb,
         std_dev_bb=std_dev_bb,
         biggest_upswing_bb=max_upswing,
         biggest_downswing_bb=-max_downswing,
     )
+
+
+def session_hand_results(conn: sqlite3.Connection, session_id: int) -> list[tuple[int, int, float]]:
+    """(hand_id, hand_number, result_bb) for one session's logged-result hands, hand_number order."""
+    return conn.execute(
+        """
+        SELECT hand_id, hand_number, result_bb FROM hands
+        WHERE session_id = ? AND result_bb IS NOT NULL
+        ORDER BY hand_number
+        """,
+        (session_id,),
+    ).fetchall()
+
+
+def combined_hand_results(conn: sqlite3.Connection) -> list[tuple[int, int, float]]:
+    """(hand_id, session_id, result_bb) for every logged-result hand, in hand_id (insertion) order."""
+    return conn.execute(
+        """
+        SELECT hand_id, session_id, result_bb FROM hands
+        WHERE result_bb IS NOT NULL
+        ORDER BY hand_id
+        """
+    ).fetchall()
 
 
 def aggregate_session_stats(conn: sqlite3.Connection) -> list[AggregateStats]:
@@ -93,17 +128,7 @@ def aggregate_session_stats(conn: sqlite3.Connection) -> list[AggregateStats]:
 
     stats = []
     for session_id, session_date, location, stakes in sessions:
-        results = [
-            row[0]
-            for row in conn.execute(
-                """
-                SELECT result_bb FROM hands
-                WHERE session_id = ? AND result_bb IS NOT NULL
-                ORDER BY hand_number
-                """,
-                (session_id,),
-            )
-        ]
+        results = [row[2] for row in session_hand_results(conn, session_id)]
         label = f"{session_date} {location} {stakes}"
         stats.append(_compute_stats(label, session_id, results))
     return stats
@@ -111,10 +136,7 @@ def aggregate_session_stats(conn: sqlite3.Connection) -> list[AggregateStats]:
 
 def aggregate_combined_stats(conn: sqlite3.Connection) -> AggregateStats:
     """One AggregateStats across every hand in the database, in hand_id (insertion) order."""
-    results = [
-        row[0]
-        for row in conn.execute("SELECT result_bb FROM hands WHERE result_bb IS NOT NULL ORDER BY hand_id")
-    ]
+    results = [row[2] for row in combined_hand_results(conn)]
     return _compute_stats("All sessions", None, results)
 
 

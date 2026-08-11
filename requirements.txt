@@ -3,8 +3,6 @@ pandas>=2.2
 treys>=0.1.8          # equity/hand-evaluation library
 typer>=0.12             # CLI framework
 pytest>=8.0
+streamlit>=1.35         # dashboard (dashboard/app.py); ships altair, used for charts
 
 # SQLite is part of the Python standard library (sqlite3) - no package needed.
-
-# --- Optional, later phase ---
-# streamlit>=1.35       # only needed if/when the dashboard phase happens
