@@ -4,8 +4,9 @@ A lightweight tool for live cash game players to log hands by hand, calculate th
 expected value of individual decisions, and aggregate win rate and variance across
 sessions.
 
-> Status: early scaffolding. Ingestion, EV engine, decision flagging, and session
-> aggregation are not built yet - see "Current status" below.
+> Status: early scaffolding. Preflop-only EV engine and decision flagging are built;
+> postflop EV, session aggregation, CLI reports, and the dashboard are not - see
+> "Current status" below.
 
 ## Why this project
 
@@ -33,17 +34,27 @@ poker-hand-analyzer/
 ├── data/
 │   └── templates/
 │       ├── hand_log_template.csv     # exact column format for logging hands
-│       └── hand_log_template_GUIDE.md  # documents every column/encoding
+│       ├── hand_log_template_GUIDE.md  # documents every column/encoding
+│       └── real_hands.csv            # real logged hands, loaded into the DB
 ├── src/
 │   └── poker_analyzer/
 │       ├── db/
 │       │   ├── schema.sql            # sessions / hands / actions tables
 │       │   └── init_db.py            # creates a SQLite DB from schema.sql
-│       └── equity/
-│           └── calculator.py         # treys-based equity calculator
-├── scripts/                # CLI entry points (not built yet)
+│       ├── ingestion/
+│       │   └── loader.py             # CSV -> validated -> loaded into SQLite
+│       ├── equity/
+│       │   └── calculator.py         # treys-based equity calculator
+│       └── ev/
+│           ├── ranges.py             # Chen-formula opponent range assignment
+│           └── engine.py             # preflop decision-level EV + +EV/-EV/marginal flagging
+├── scripts/
+│   └── ingest_hand_log.py            # CLI: ingest a hand-log CSV into the DB
 └── tests/
-    └── test_equity_calculator.py
+    ├── test_equity_calculator.py
+    ├── test_hand_log_validator.py
+    ├── test_ingestion.py
+    └── test_ev_engine.py
 ```
 
 ## Setup
@@ -93,20 +104,53 @@ between two starting hands, given 0, 3, or 4 known board cards. It's validated i
 pytest
 ```
 
+## Preflop EV engine
+
+`src/poker_analyzer/ev/` computes decision-level EV for hero's preflop actions
+(fold / check / call / bet / raise) already loaded into the database:
+
+- `ev/ranges.py` scores all 169 starting hands with the Chen formula and turns a
+  percentile cut over that scale into an opponent's range (e.g. "top 10%"). See the
+  module docstring for why this approach was chosen over a curated per-position range
+  chart.
+- `ev/engine.py` reconstructs the pot and hero's cost from the logged preflop action
+  sequence (blinds aren't logged as actions, so this assumes the standard SB=0.5bb /
+  BB=1.0bb posts), assigns the opposing range for hero's specific spot, computes hero's
+  equity against it with the existing equity calculator, and compares a static EV of
+  hero's action (assuming a check to showdown from here - no fold equity, no postflop
+  betting modeled) against EV(fold) = 0, flagging the decision `+EV`, `-EV`, or
+  `marginal`. See the module docstring for the full reasoning and known limitations.
+
+```python
+from poker_analyzer.ev.engine import analyze_all_preflop_decisions
+
+for decision in analyze_all_preflop_decisions("poker_hands.db"):
+    print(decision.hand_id, decision.action_type, decision.hero_equity_pct, decision.flag)
+```
+
+Validated in `tests/test_ev_engine.py` against real hands from `data/templates/real_hands.csv`
+and a couple of textbook preflop spots. Postflop EV, multiway equity, and fold-equity
+modeling are all explicitly out of scope for this pass - see the module docstrings.
+
 ## Current status
 
-Built so far (this session):
+Built so far:
 
 - [x] Project scaffolding
 - [x] SQLite schema (sessions, hands, actions) - structure only
 - [x] CSV hand-log template + guide
 - [x] CSV validator for hand-log files, with pytest coverage
 - [x] Equity calculator, validated against known spots
+- [x] Hand data ingestion pipeline (CSV -> validated -> loaded into SQLite), with pytest coverage
+- [x] 15 real hands loaded into the database, across 2 sessions
+- [x] Preflop EV engine: decision-level EV vs. folding, +EV/-EV/marginal flagging,
+      Chen-formula opponent range assignment - validated against real hands and
+      textbook spots
 
 Not built yet (later sessions, per the project spec's build phases):
 
-- [ ] Synthetic/real hand data ingestion pipeline
-- [ ] EV engine (decision-level EV vs. alternatives, plus/minus/marginal flagging)
+- [ ] Postflop EV engine (needs its own dedicated design work - multiway equity,
+      board texture, bet sizing all change the range-assignment approach)
 - [ ] Session aggregation (win rate in bb/100, variance, std dev, up/downswing tracking)
 - [ ] CLI reports
 - [ ] Dashboard (pandas + matplotlib, or Streamlit)
