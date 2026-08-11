@@ -4,9 +4,9 @@ A lightweight tool for live cash game players to log hands by hand, calculate th
 expected value of individual decisions, and aggregate win rate and variance across
 sessions.
 
-> Status: early scaffolding. Preflop-only EV engine, decision flagging, and session
-> aggregation stats are built; postflop EV, CLI reports, and the dashboard are not -
-> see "Current status" below.
+> Status: early scaffolding. Preflop-only EV engine, decision flagging, session
+> aggregation stats, and a unified CLI are built; postflop EV and the dashboard are
+> not - see "Current status" below.
 
 ## Why this project
 
@@ -38,6 +38,7 @@ poker-hand-analyzer/
 │       └── real_hands.csv            # real logged hands, loaded into the DB
 ├── src/
 │   └── poker_analyzer/
+│       ├── cli.py                    # unified Typer CLI: validate / ingest / stats / ev-report
 │       ├── db/
 │       │   ├── schema.sql            # sessions / hands / actions tables
 │       │   └── init_db.py            # creates a SQLite DB from schema.sql
@@ -51,9 +52,9 @@ poker-hand-analyzer/
 │       └── stats/
 │           └── aggregator.py         # per-session + combined win rate, variance, swings
 ├── scripts/
-│   ├── ingest_hand_log.py            # CLI: ingest a hand-log CSV into the DB
-│   └── print_stats_summary.py        # prints the session aggregation stats to the terminal
+│   └── poker_cli.py                  # executable entry point for src/poker_analyzer/cli.py
 └── tests/
+    ├── test_cli.py
     ├── test_equity_calculator.py
     ├── test_hand_log_validator.py
     ├── test_ingestion.py
@@ -85,13 +86,41 @@ Use `data/templates/hand_log_template.csv` as the format for manually logging ha
 from live play. Read `data/templates/hand_log_template_GUIDE.md` first - it documents
 every column and the encoding used for actions-by-street and cards.
 
+## CLI
+
+Everything below - validating a CSV, ingesting it, and reporting stats/EV - is
+available as subcommands of one Typer CLI, `scripts/poker_cli.py`. Each subcommand
+is a thin wrapper: all the actual logic lives in the modules under
+`src/poker_analyzer/` (validation, ingestion, stats, ev), so the CLI has nothing to
+duplicate or drift out of sync with.
+
+```bash
+python scripts/poker_cli.py --help
+
+python scripts/poker_cli.py validate data/templates/hand_log_template.csv
+python scripts/poker_cli.py ingest data/templates/real_hands.csv --db poker_hands.db
+python scripts/poker_cli.py stats --db poker_hands.db
+python scripts/poker_cli.py ev-report --db poker_hands.db
+```
+
+| Subcommand  | Wraps                                  | Key options |
+|-------------|-----------------------------------------|--------------|
+| `validate`  | `validation/validator.py`               | `csv_path` |
+| `ingest`    | `ingestion/loader.py`                   | `csv_path`, `--db`, `--buy-in-cents` |
+| `stats`     | `stats/aggregator.py`                   | `--db` |
+| `ev-report` | `ev/engine.py`                          | `--db`, `--trials`, `--seed` |
+
+Run `python scripts/poker_cli.py <subcommand> --help` for full option details.
+Tested end-to-end (and with each subcommand's dispatch to its underlying module
+verified independently of the real logic) in `tests/test_cli.py`.
+
 ## CSV validator
 
 Run the validator against a hand-log CSV to check the structure and field formats
 before using it downstream:
 
 ```bash
-python src/poker_analyzer/validation/validator.py data/templates/hand_log_template.csv
+python scripts/poker_cli.py validate data/templates/hand_log_template.csv
 ```
 
 It reports row/column-specific errors for missing columns, bad dates, malformed card
@@ -132,6 +161,25 @@ for decision in analyze_all_preflop_decisions("poker_hands.db"):
     print(decision.hand_id, decision.action_type, decision.hero_equity_pct, decision.flag)
 ```
 
+Until now this was the only way to see the engine's output - it was returned from a
+function call and never printed anywhere. `poker_cli.py ev-report` prints it per hand:
+hero's position, the action taken, the `+EV`/`-EV`/`marginal` flag, and the equity/EV
+numbers behind it (folds print as `baseline` - no EV is computed for a $0-cost action):
+
+```bash
+python scripts/poker_cli.py ev-report --db poker_hands.db
+
+# Poker Hand Analyzer - Preflop EV Report
+# ============================================
+#
+# Hand 6 (session 1) - hero: CO
+#   raise 7.50bb     flag: +EV      equity:  78.3%  EV(action): +7.76bb  EV(fold): +0.00bb  diff: +7.76bb
+```
+
+`--trials` and `--seed` control the Monte Carlo equity simulation (trials per opponent
+range combo, and a seed for reproducible runs - see `tests/test_cli.py` and
+`tests/test_ev_engine.py` for seeded examples).
+
 Validated in `tests/test_ev_engine.py` against real hands from `data/templates/real_hands.csv`
 and a couple of textbook preflop spots. Postflop EV, multiway equity, and fold-equity
 modeling are all explicitly out of scope for this pass - see the module docstrings.
@@ -148,11 +196,11 @@ in `tests/test_stats_aggregator.py` against the real 15 hands now in the databas
 a hand-verifiable constructed sequence.
 
 ```bash
-python scripts/print_stats_summary.py
+python scripts/poker_cli.py stats --db poker_hands.db
 ```
 
 With only 15 hands loaded, none of these numbers - especially bb/100 - are
-statistically meaningful yet; the script prints that caveat alongside the numbers.
+statistically meaningful yet; the command prints that caveat alongside the numbers.
 This is a correctness check on the calculation pipeline, not a performance read.
 
 ## Current status
@@ -170,15 +218,19 @@ Built so far:
       Chen-formula opponent range assignment - validated against real hands and
       textbook spots
 - [x] Session aggregation (win rate in bb/100, variance, std dev, up/downswing
-      tracking) - per-session and combined, validated against the 15 real hands,
-      plus a terminal summary script
+      tracking) - per-session and combined, validated against the 15 real hands
+- [x] Unified CLI (`scripts/poker_cli.py`, Typer) with `validate` / `ingest` /
+      `stats` / `ev-report` subcommands, wrapping the modules above rather than
+      duplicating their logic - with pytest coverage of argument parsing, dispatch,
+      and end-to-end runs
+- [x] `ev-report`: the first place the preflop EV engine's output is actually
+      printed anywhere (position, action, +EV/-EV/marginal flag, equity/EV numbers)
 
 Not built yet (later sessions, per the project spec's build phases):
 
 - [ ] Postflop EV engine (needs its own dedicated design work - multiway equity,
       board texture, bet sizing all change the range-assignment approach)
-- [ ] CLI reports (a real CLI with flags/arguments - today's stats summary script
-      just runs and prints)
+- [ ] Fold equity modeling
 - [ ] Dashboard (pandas + matplotlib, or Streamlit)
 - [ ] Portfolio writeup
 

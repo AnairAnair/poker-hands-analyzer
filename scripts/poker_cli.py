@@ -6,8 +6,8 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from poker_analyzer.validation.validator import main
+from poker_analyzer.cli import app
 
 
 if __name__ == "__main__":
-    main()
+    app()
