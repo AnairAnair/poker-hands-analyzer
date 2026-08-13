@@ -4,9 +4,10 @@ A lightweight tool for live cash game players to log hands by hand, calculate th
 expected value of individual decisions, and aggregate win rate and variance across
 sessions.
 
-> Status: early scaffolding. Preflop-only EV engine, decision flagging, session
-> aggregation stats, a unified CLI, and a Streamlit dashboard are built; postflop EV
-> and fold equity modeling are not - see "Current status" below.
+> Status: early scaffolding. Preflop EV engine (with fold equity) and a postflop EV
+> engine (range narrowing, no fold equity yet), decision flagging, session
+> aggregation stats, a unified CLI, and a Streamlit dashboard are built - see
+> "Current status" below.
 
 ## Why this project
 
@@ -49,7 +50,7 @@ poker-hand-analyzer/
 │       │   └── calculator.py         # treys-based equity calculator
 │       ├── ev/
 │       │   ├── ranges.py             # Chen-formula opponent range assignment
-│       │   └── engine.py             # preflop decision-level EV + +EV/-EV/marginal flagging
+│       │   └── engine.py             # preflop + postflop decision-level EV, +EV/-EV/marginal flagging
 │       ├── stats/
 │       │   └── aggregator.py         # per-session + combined win rate, variance, swings
 │       └── dashboard/
@@ -153,17 +154,50 @@ pytest
   chart.
 - `ev/engine.py` reconstructs the pot and hero's cost from the logged preflop action
   sequence (blinds aren't logged as actions, so this assumes the standard SB=0.5bb /
-  BB=1.0bb posts), assigns the opposing range for hero's specific spot, computes hero's
-  equity against it with the existing equity calculator, and compares a static EV of
-  hero's action (assuming a check to showdown from here - no fold equity, no postflop
-  betting modeled) against EV(fold) = 0, flagging the decision `+EV`, `-EV`, or
-  `marginal`. See the module docstring for the full reasoning and known limitations.
+  BB=1.0bb posts), assigns the opposing range for hero's specific spot, and computes
+  hero's EV for the action taken against EV(fold) = 0, flagging the decision `+EV`,
+  `-EV`, or `marginal`. See the module docstring for the full reasoning and known
+  limitations.
+
+  For a check/call, that EV is a *static* showdown number: hero's equity against the
+  full opponent range (via the equity calculator), as if the hand were checked down
+  from here with no further betting - postflop betting is still out of scope.
+
+  For a bet/raise, hero's action can actually fold villain out, so the EV splits into
+  two branches: villain folds (hero wins the pot as it stood before hero's bet,
+  uncontested) or villain continues (the same equity-vs-range showdown math, but now
+  against only the sub-range that would realistically continue). The fold probability
+  is estimated with **minimum defense frequency (MDF)**, a standard poker-theory
+  result: facing a bet of size `B` into a pot of size `P`, a defender must continue
+  with at least `P / (P + B)` of their range to avoid being exploitable by a bettor
+  betting every hand, so this project uses MDF's complement, `B / (P + B)`, as the
+  fold-frequency estimate (`estimate_fold_pct` in `ev/engine.py`). The villain combos
+  that "fold" are modeled as the weakest slice of villain's already-assigned range
+  band (`ev/ranges.py`'s bands are ordered strongest-to-weakest), so a bet trims that
+  band down to a narrower "continuing" range before the same equity-vs-range
+  calculation runs.
+
+  This was a real design decision with more than one reasonable approach (decided
+  with the user): the alternative was a static fold-% lookup table keyed by action
+  type/position, similar in shape to `OPEN_RAISE_TOP_PCT`. MDF was chosen because it
+  responds to hero's actual bet size (already reconstructed for every decision)
+  rather than treating a min-raise and a pot-sized raise identically, and because it
+  reuses the same percentile-band range representation already built in
+  `ev/ranges.py` instead of adding a second, disconnected model.
+
+  **Known limitation, explicitly:** MDF is an equilibrium/GTO benchmark, not a read
+  on any real villain - it assumes they defend *exactly* enough to stay unexploitable.
+  Real opponents, especially in the live-cash/informal-game context this project
+  targets, very often over-fold (or occasionally under-fold) relative to MDF. Treat
+  `fold_pct` as a principled first-pass estimate, not a tendency read. See the "Fold
+  equity" section of `ev/engine.py`'s module docstring for the full writeup.
 
 ```python
 from poker_analyzer.ev.engine import analyze_all_preflop_decisions
 
 for decision in analyze_all_preflop_decisions("poker_hands.db"):
     print(decision.hand_id, decision.action_type, decision.hero_equity_pct, decision.flag)
+    print(decision.fold_pct, decision.continuing_range_band)  # bet/raise only, else None
 ```
 
 Until now this was the only way to see the engine's output - it was returned from a
@@ -181,13 +215,87 @@ python scripts/poker_cli.py ev-report --db poker_hands.db
 #   raise 7.50bb     flag: +EV      equity:  78.3%  EV(action): +7.76bb  EV(fold): +0.00bb  diff: +7.76bb
 ```
 
+(`equity` above is hero's equity against whichever range actually feeds the EV number -
+the full opponent band for a check/call, or the narrower post-fold-equity continuing
+range for a bet/raise; `fold_pct`/`continuing_range_band` aren't in the CLI's printed
+line yet, but are on every `PreflopDecision` for a bet/raise.)
+
 `--trials` and `--seed` control the Monte Carlo equity simulation (trials per opponent
 range combo, and a seed for reproducible runs - see `tests/test_cli.py` and
 `tests/test_ev_engine.py` for seeded examples).
 
-Validated in `tests/test_ev_engine.py` against real hands from `data/templates/real_hands.csv`
-and a couple of textbook preflop spots. Postflop EV, multiway equity, and fold-equity
-modeling are all explicitly out of scope for this pass - see the module docstrings.
+Validated in `tests/test_ev_engine.py` against real hands from `data/templates/real_hands.csv`,
+a couple of textbook preflop spots (including a UTG pocket-aces open, which now clearly
+flags `+EV` once fold equity is credited - it only came back `marginal` before), and
+direct unit tests of the fold-equity math (`estimate_fold_pct`, `_continuing_band`) in
+isolation. Multiway equity is still explicitly out of scope - see the module docstrings.
+
+## Postflop EV engine
+
+`ev/engine.py`'s `analyze_hand_postflop` extends the same decision-level EV analysis -
+equity against an assigned villain range, compared to EV(fold) = 0, flagged `+EV` /
+`-EV` / `marginal` - to hero's flop/turn/river actions. It shares the preflop engine's
+percentile-band range representation and its `+EV`/`-EV`/`marginal` flagging, but
+differs in two ways:
+
+- **Range narrowing carries forward street by street** instead of being assigned fresh
+  per decision. Villain's range enters the flop as whatever band the full preflop
+  action sequence implies (the same range assignment `analyze_hand_preflop` uses), then
+  narrows further every time an *opponent* bets, raises, or checks on a later street: a
+  bet or raise narrows the band toward its strong end, using a fixed multiplier
+  (`POSTFLOP_BET_NARROW_PCT` = 40%, `POSTFLOP_RAISE_NARROW_PCT` = 20%); a check applies
+  only a small cap (`POSTFLOP_CHECK_NARROW_PCT` = 90%). This compounds across streets -
+  an opponent betting both the flop and the turn narrows the band twice - and reuses
+  `_continuing_band`, the same mechanic fold equity uses to shrink a band toward
+  strength, applied here for a different purpose (narrowing villain's range from
+  villain's own action, not splitting hero's bet into fold/continue branches). A call
+  never narrows anything - it inherits whatever the last bet/raise/check already set -
+  and hero's own actions never narrow the band either, since this estimates *villain's*
+  range from *villain's* actions.
+
+  This was a real design decision with more than one reasonable approach (decided with
+  the user): the alternative was letting the narrowing amount also depend on board
+  texture (a bet on a wet, coordinated board narrowing more than the same bet on a dry
+  one). Fixed per-action-type multipliers were chosen instead, for the same reason MDF
+  won out over a static fold-% lookup table for preflop fold equity: it reuses the
+  existing percentile-band machinery directly with no new model to design or tune this
+  session. Board-texture-aware narrowing is a reasonable follow-up, not ruled out.
+
+- **Equity is computed against the actual board** at each street (3 cards on the flop,
+  4 on the turn, 5 on the river), via `equity_vs_range`'s new optional `board`
+  parameter, which passes straight through to the existing `calculate_equity` -
+  already validated against partial boards (see `tests/test_equity_calculator.py`'s
+  flush-draw-vs-overpair flop spot, reused directly in the postflop engine tests).
+  Getting a fully-known river board working required a small extension to
+  `calculate_equity` itself: it previously only accepted 0/3/4 board cards, but a river
+  decision needs all 5 - the underlying exact-enumeration logic already handled this
+  correctly (a complete board has exactly one possible "runout", the empty one), only
+  the validation was too strict. Board cards are also excluded as dead cards alongside
+  hero's own hole cards when enumerating villain's range combos.
+
+**Postflop fold equity is deliberately not modeled this session** - a postflop
+bet/raise's `ev_action_bb` is a static showdown number against the narrowed range,
+exactly like a preflop check/call (or like every preflop decision before fold equity
+was added). Preflop needed its own two-session split - the engine itself, then fold
+equity on top of it - rather than doing both at once, and postflop follows the same
+split for the same reason.
+
+```python
+from poker_analyzer.ev.engine import analyze_all_postflop_decisions
+
+for decision in analyze_all_postflop_decisions("poker_hands.db"):
+    print(decision.hand_id, decision.street, decision.board, decision.hero_equity_pct, decision.flag)
+```
+
+Validated in `tests/test_ev_engine.py`: real postflop hands from `data/templates/real_hands.csv`
+(a flopped set of aces that stays `+EV` on every street, a rivered nut flush that's a
+deterministic 100% equity lock, a postflop fold correctly flagged `baseline` with no
+equity computed), a constructed textbook spot reusing the flush-draw-vs-overpair flop
+example (Ah Kh vs. a tight, pair-heavy 3-bet range on Jh 8h 3c comes back a slight
+equity favorite, same counterintuitive lesson as the single-hand example, now running
+through the full range-narrowing pipeline), and direct unit tests of the range-narrowing
+replay (`_reconstruct_postflop_street`) pinning down exactly which actions narrow the
+band and by how much, independent of equity simulation.
 
 ## Session aggregation stats
 
@@ -265,6 +373,16 @@ Built so far:
 - [x] Preflop EV engine: decision-level EV vs. folding, +EV/-EV/marginal flagging,
       Chen-formula opponent range assignment - validated against real hands and
       textbook spots
+- [x] Fold equity modeling for bet/raise decisions (MDF-derived fold-frequency
+      estimate, continuing-range equity) - validated against real hands, a textbook
+      spot, and direct unit tests of the fold-equity math
+- [x] Postflop EV engine: decision-level EV for flop/turn/river actions, with
+      villain's range narrowing street by street from postflop actions (fixed
+      per-action-type multipliers, reusing the preflop percentile-band machinery)
+      and equity computed against the actual board at each street - validated
+      against real hands, a textbook spot, and direct unit tests of the
+      range-narrowing replay. Not yet wired into `ev-report` or the dashboard,
+      which still only display preflop decisions - see "Not built yet" below.
 - [x] Session aggregation (win rate in bb/100, variance, std dev, up/downswing
       tracking) - per-session and combined, validated against the 15 real hands
 - [x] Unified CLI (`scripts/poker_cli.py`, Typer) with `validate` / `ingest` /
@@ -280,9 +398,15 @@ Built so far:
 
 Not built yet (later sessions, per the project spec's build phases):
 
-- [ ] Postflop EV engine (needs its own dedicated design work - multiway equity,
-      board texture, bet sizing all change the range-assignment approach)
-- [ ] Fold equity modeling
+- [ ] Postflop fold equity (a postflop bet/raise folding out worse hands, the way
+      preflop fold equity already works) - deliberately deferred this session, same
+      reasoning as preflop's own engine-then-fold-equity split
+- [ ] Board-texture-aware postflop range narrowing (the alternative considered and
+      set aside in favor of fixed per-action-type multipliers - see "Postflop EV
+      engine" above)
+- [ ] Wiring postflop decisions into `ev-report` / the dashboard (both still only
+      display preflop decisions)
+- [ ] Leak-detection / pattern analysis across logged decisions
 - [ ] Portfolio writeup
 
 ## License

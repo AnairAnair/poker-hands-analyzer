@@ -85,6 +85,29 @@ def test_identical_ranks_different_suits_tie_when_no_flush_is_possible():
     assert result.tie_equity == 100.0, result
 
 
+def test_complete_five_card_river_board_is_a_direct_exact_comparison():
+    """
+    A 5-card (river/complete) board leaves nothing left to run out, so equity
+    collapses to a single direct hand comparison - added to support the postflop EV
+    engine's river decisions (poker_analyzer.ev.engine.analyze_hand_postflop), which
+    always has a fully known board by the time hero acts on the river.
+
+    Ah Kh vs Qs Qd on Jh 8h 3c is the flush-draw-vs-overpair textbook spot above -
+    hero already has 4 hearts after the flop (2 hole + Jh/8h), so one more heart on
+    either the turn or river completes the nut flush. Run it out with a heart turn
+    (2h) and a blank river (5c): hero's rivered flush beats villain's pair of queens
+    outright, so this should be 100% equity, exactly one "runout" (the empty one),
+    not a percentage.
+    """
+    result = calculate_equity(hero="Ah Kh", villain="Qs Qd", board="Jh 8h 3c 2h 5c")
+
+    assert result.method == "exact"
+    assert result.trials == 1
+    assert result.hero_equity == 100.0, result
+    assert result.villain_equity == 0.0, result
+    assert result.tie_equity == 0.0, result
+
+
 def test_parse_cards_accepts_string_and_list():
     from poker_analyzer.equity.calculator import parse_cards
 

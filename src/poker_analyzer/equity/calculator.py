@@ -6,8 +6,10 @@ poker hand very quickly, but it doesn't compute equity by itself - equity requir
 running that evaluator across every possible way the remaining board cards could
 come out. This module does that:
 
-- When the number of possible runouts is small (any flop or turn board), it
-  enumerates every remaining combination exhaustively and returns an exact answer.
+- When the number of possible runouts is small (any flop, turn, or complete/river
+  board - a river board has exactly one "runout", the empty one, so it's a direct
+  hand comparison), it enumerates every remaining combination exhaustively and
+  returns an exact answer.
 - When it's large (a 0-card preflop board needs a full 5-card runout, ~1.7M
   combinations), exhaustive enumeration is too slow to be practical, so it falls
   back to Monte Carlo sampling instead.
@@ -82,7 +84,11 @@ def calculate_equity(
     Calculate heads-up equity between two starting hands.
 
     hero / villain: exactly two hole cards each, e.g. "As Ad" or ["As", "Ad"].
-    board: 0 (preflop), 3 (flop), or 4 (turn) known board cards.
+    board: 0 (preflop), 3 (flop), 4 (turn), or 5 (river/complete board) known cards.
+        A 5-card board leaves nothing left to run out, so it's a single direct hand
+        comparison rather than an equity distribution - hero_equity/villain_equity
+        come back as 0 or 100 (or split 50/50 on a tie), same shape as any other
+        board size, just with only one possible "runout" (the empty one).
     trials: Monte Carlo sample size, only used when exhaustive enumeration isn't
         feasible (i.e. only for a 0-card/preflop board). Ignored otherwise.
     seed: RNG seed for Monte Carlo sampling, for reproducible results in tests.
@@ -96,9 +102,10 @@ def calculate_equity(
         raise ValueError(f"hero must have exactly 2 hole cards, got {len(hero_cards)}")
     if len(villain_cards) != 2:
         raise ValueError(f"villain must have exactly 2 hole cards, got {len(villain_cards)}")
-    if len(board_cards) not in (0, 3, 4):
+    if len(board_cards) not in (0, 3, 4, 5):
         raise ValueError(
-            f"board must have 0 (preflop), 3 (flop), or 4 (turn) cards, got {len(board_cards)}"
+            f"board must have 0 (preflop), 3 (flop), 4 (turn), or 5 (river) cards, "
+            f"got {len(board_cards)}"
         )
 
     known = set(hero_cards) | set(villain_cards) | set(board_cards)

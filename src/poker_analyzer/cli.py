@@ -19,7 +19,9 @@ import typer
 from poker_analyzer.ev.engine import (
     DEFAULT_TRIALS_PER_COMBO,
     EVEngineError,
+    PostflopDecision,
     PreflopDecision,
+    analyze_all_postflop_decisions,
     analyze_all_preflop_decisions,
 )
 from poker_analyzer.ingestion.loader import IngestionError, load_hand_log_csv
@@ -78,10 +80,12 @@ def stats(
     print_summary(db)
 
 
-def _format_decision(decision: PreflopDecision) -> str:
+def _format_decision(decision: PreflopDecision | PostflopDecision, street: str | None = None) -> str:
     action = decision.action_type
     if decision.amount_bb is not None:
         action = f"{action} {decision.amount_bb:.2f}bb"
+    if street is not None:
+        action = f"{street}: {action}"
 
     if decision.flag == "baseline":
         return f"{action:<16} flag: baseline (fold, no EV computed)"
@@ -105,26 +109,41 @@ def ev_report(
         None, "--seed", help="Random seed for reproducible equity simulation"
     ),
 ) -> None:
-    """Print hero's preflop decisions: position, action, EV flag, and the equity/EV behind it."""
+    """Print hero's preflop and postflop decisions: position, action, EV flag, and the equity/EV behind it."""
     try:
-        decisions = analyze_all_preflop_decisions(db, trials_per_combo=trials, seed=seed)
+        preflop_decisions = analyze_all_preflop_decisions(db, trials_per_combo=trials, seed=seed)
+        postflop_decisions = analyze_all_postflop_decisions(db, trials_per_combo=trials, seed=seed)
     except EVEngineError as exc:
         typer.echo(f"EV report failed:\n{exc}")
         raise typer.Exit(code=1)
 
-    if not decisions:
+    if not preflop_decisions:
         typer.echo("No preflop decisions found - is the database empty?")
         return
 
-    typer.echo("Poker Hand Analyzer - Preflop EV Report")
+    typer.echo("Poker Hand Analyzer - EV Report")
     typer.echo("=" * 44)
 
+    # Postflop decisions only exist for hands that reached the flop, so they're
+    # bucketed by hand_id and printed after that hand's preflop lines rather than
+    # interleaved with analyze_all_preflop_decisions' own ordering.
+    postflop_by_hand: dict[int, list[PostflopDecision]] = {}
+    for decision in postflop_decisions:
+        postflop_by_hand.setdefault(decision.hand_id, []).append(decision)
+
     current_hand_id: int | None = None
-    for decision in decisions:
+    for decision in preflop_decisions:
         if decision.hand_id != current_hand_id:
+            if current_hand_id is not None:
+                for postflop_decision in postflop_by_hand.get(current_hand_id, []):
+                    typer.echo(f"  {_format_decision(postflop_decision, street=postflop_decision.street)}")
             current_hand_id = decision.hand_id
             typer.echo(f"\nHand {decision.hand_id} (session {decision.session_id}) - hero: {decision.hero_position}")
         typer.echo(f"  {_format_decision(decision)}")
+
+    if current_hand_id is not None:
+        for postflop_decision in postflop_by_hand.get(current_hand_id, []):
+            typer.echo(f"  {_format_decision(postflop_decision, street=postflop_decision.street)}")
 
 
 def main() -> None:

@@ -18,7 +18,7 @@ from typer.testing import CliRunner
 
 from poker_analyzer import cli
 from poker_analyzer.db.init_db import init_db
-from poker_analyzer.ev.engine import PreflopDecision
+from poker_analyzer.ev.engine import PostflopDecision, PreflopDecision
 from poker_analyzer.ingestion.loader import IngestionError
 
 runner = CliRunner()
@@ -185,16 +185,42 @@ def _make_decision(**overrides):
     return PreflopDecision(**fields)
 
 
+def _make_postflop_decision(**overrides):
+    fields = dict(
+        hand_id=1,
+        session_id=1,
+        hero_position="BTN",
+        street="flop",
+        action_type="bet",
+        amount_bb=4.0,
+        pot_before_bb=6.5,
+        cost_bb=4.0,
+        board="Jh 8h 3c",
+        opponent_range_band=(0, 12),
+        opponent_range_combo_count=18,
+        hero_equity_pct=71.0,
+        ev_action_bb=3.2,
+        ev_fold_bb=0.0,
+        ev_diff_bb=3.2,
+        flag="+EV",
+    )
+    fields.update(overrides)
+    return PostflopDecision(**fields)
+
+
 def test_ev_report_calls_engine_with_parsed_args(monkeypatch):
     seen = {}
 
-    def fake_analyze(db_path, trials_per_combo, seed):
-        seen["db_path"] = db_path
-        seen["trials_per_combo"] = trials_per_combo
-        seen["seed"] = seed
+    def fake_analyze_preflop(db_path, trials_per_combo, seed):
+        seen["preflop"] = {"db_path": db_path, "trials_per_combo": trials_per_combo, "seed": seed}
         return [_make_decision()]
 
-    monkeypatch.setattr(cli, "analyze_all_preflop_decisions", fake_analyze)
+    def fake_analyze_postflop(db_path, trials_per_combo, seed):
+        seen["postflop"] = {"db_path": db_path, "trials_per_combo": trials_per_combo, "seed": seed}
+        return []
+
+    monkeypatch.setattr(cli, "analyze_all_preflop_decisions", fake_analyze_preflop)
+    monkeypatch.setattr(cli, "analyze_all_postflop_decisions", fake_analyze_postflop)
 
     result = runner.invoke(
         cli.app,
@@ -202,7 +228,8 @@ def test_ev_report_calls_engine_with_parsed_args(monkeypatch):
     )
 
     assert result.exit_code == 0
-    assert seen == {"db_path": "my.db", "trials_per_combo": 50, "seed": 7}
+    expected = {"db_path": "my.db", "trials_per_combo": 50, "seed": 7}
+    assert seen == {"preflop": expected, "postflop": expected}
 
 
 def test_ev_report_prints_position_action_flag_and_ev_numbers(monkeypatch):
@@ -217,6 +244,9 @@ def test_ev_report_prints_position_action_flag_and_ev_numbers(monkeypatch):
     )
     monkeypatch.setattr(
         cli, "analyze_all_preflop_decisions", lambda db_path, trials_per_combo, seed: [decision]
+    )
+    monkeypatch.setattr(
+        cli, "analyze_all_postflop_decisions", lambda db_path, trials_per_combo, seed: []
     )
 
     result = runner.invoke(cli.app, ["ev-report"])
@@ -244,6 +274,9 @@ def test_ev_report_flags_fold_as_baseline_without_ev_numbers(monkeypatch):
     monkeypatch.setattr(
         cli, "analyze_all_preflop_decisions", lambda db_path, trials_per_combo, seed: [fold_decision]
     )
+    monkeypatch.setattr(
+        cli, "analyze_all_postflop_decisions", lambda db_path, trials_per_combo, seed: []
+    )
 
     result = runner.invoke(cli.app, ["ev-report"])
 
@@ -254,11 +287,62 @@ def test_ev_report_flags_fold_as_baseline_without_ev_numbers(monkeypatch):
 
 def test_ev_report_handles_empty_database(monkeypatch):
     monkeypatch.setattr(cli, "analyze_all_preflop_decisions", lambda db_path, trials_per_combo, seed: [])
+    monkeypatch.setattr(cli, "analyze_all_postflop_decisions", lambda db_path, trials_per_combo, seed: [])
 
     result = runner.invoke(cli.app, ["ev-report"])
 
     assert result.exit_code == 0
     assert "No preflop decisions found" in result.stdout
+
+
+def test_ev_report_prints_postflop_lines_after_hands_preflop_lines(monkeypatch):
+    preflop_decision = _make_decision(hand_id=1, hero_position="BTN", action_type="raise")
+    flop_decision = _make_postflop_decision(
+        hand_id=1, street="flop", action_type="bet", amount_bb=4.0, hero_equity_pct=71.0
+    )
+    turn_decision = _make_postflop_decision(
+        hand_id=1, street="turn", action_type="check", amount_bb=None, hero_equity_pct=65.0
+    )
+    monkeypatch.setattr(
+        cli, "analyze_all_preflop_decisions", lambda db_path, trials_per_combo, seed: [preflop_decision]
+    )
+    monkeypatch.setattr(
+        cli,
+        "analyze_all_postflop_decisions",
+        lambda db_path, trials_per_combo, seed: [flop_decision, turn_decision],
+    )
+
+    result = runner.invoke(cli.app, ["ev-report"])
+
+    assert result.exit_code == 0
+    assert "flop: bet 4.00bb" in result.stdout
+    assert "turn: check" in result.stdout
+    preflop_line = result.stdout.index("raise")
+    flop_line = result.stdout.index("flop: bet")
+    turn_line = result.stdout.index("turn: check")
+    assert preflop_line < flop_line < turn_line
+
+
+def test_ev_report_groups_postflop_lines_under_correct_hand(monkeypatch):
+    hand1_preflop = _make_decision(hand_id=1, hero_position="BTN")
+    hand2_preflop = _make_decision(hand_id=2, hero_position="CO")
+    hand2_flop = _make_postflop_decision(hand_id=2, street="flop")
+    monkeypatch.setattr(
+        cli,
+        "analyze_all_preflop_decisions",
+        lambda db_path, trials_per_combo, seed: [hand1_preflop, hand2_preflop],
+    )
+    monkeypatch.setattr(
+        cli, "analyze_all_postflop_decisions", lambda db_path, trials_per_combo, seed: [hand2_flop]
+    )
+
+    result = runner.invoke(cli.app, ["ev-report"])
+
+    assert result.exit_code == 0
+    hand1_header = result.stdout.index("Hand 1")
+    hand2_header = result.stdout.index("Hand 2")
+    flop_line = result.stdout.index("flop: bet")
+    assert hand1_header < hand2_header < flop_line
 
 
 # --- end-to-end, real pipeline (no mocks) ---------------------------------------------
