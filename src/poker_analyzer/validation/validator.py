@@ -163,19 +163,3 @@ def validate_hand_log_csv(path: str | Path) -> List[str]:
                     )
 
     return errors
-
-
-def main() -> None:
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Validate a hand log CSV against the project template rules")
-    parser.add_argument("csv_path", type=Path, help="Path to the hand log CSV to validate")
-    args = parser.parse_args()
-
-    errors = validate_hand_log_csv(args.csv_path)
-    if errors:
-        print(f"Validation failed for {args.csv_path}:")
-        for error in errors:
-            print(f"- {error}")
-    else:
-        print(f"Validation passed for {args.csv_path}")

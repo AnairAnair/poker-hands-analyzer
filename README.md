@@ -11,8 +11,6 @@ sessions.
 
 ## Why this project
 
-## Why this project
-
 See [WRITEUP.md](./WRITEUP.md) for the full writeup: the finance-skills framing,
 what the tool actually found once real data was behind it, and the process of
 directing an AI coding tool through this build.
@@ -300,7 +298,7 @@ python scripts/poker_cli.py ev-report --db poker_hands.db
 # ============================================
 #
 # Hand 6 (session 1) - hero: CO
-#   raise 7.50bb     flag: +EV      equity:  78.3%  fold_pct: 55.6%  EV(action): +7.76bb  EV(fold): +0.00bb  diff: +7.76bb
+#   raise 7.50bb     flag: +EV      equity:  79.2%  fold_pct: 38.5%  EV(action): +9.50bb  EV(fold): +0.00bb  diff: +9.50bb
 ```
 
 (`equity` above is hero's equity against whichever range actually feeds the EV number -
@@ -439,23 +437,28 @@ pattern's existing `ev_diff_bb`/`flag` fields, reusing `ev/engine.py`'s own
 `MARGINAL_THRESHOLD_BB` to classify a pattern's *average* diff the same way a
 single decision's diff is already classified.
 
-**Minimum sample size.** With only 15 hands in the database, most patterns occur
-once or twice - not enough repetition to mean anything yet, the same caveat
-`stats/aggregator.py` already applies to overall hand count, applied here per
-pattern instead. A pattern needs at least `MIN_SAMPLE_SIZE` = **3** occurrences
-before it's reported as a real `leak` / `marginal` / `fine` verdict; below that,
-it's labeled `insufficient_data` - never dropped from the report, just not called
-a leak. 3 was chosen (checked against the real database, confirmed with the user)
-because it's the smallest threshold that already surfaces real signal without
-overreaching: at 3, two patterns clear the bar (`UTG raises` x6, `UTG turn bets`
-x3) while the rest stay honestly unclassified; at 2, eleven patterns would
-qualify - barely more reliable than a single hand; at 4+, almost nothing would
-qualify yet, defeating the point of running this now. Override it with
-`--min-sample` if you want a stricter or looser bar.
+**Minimum sample size.** `MIN_SAMPLE_SIZE` = **3** is the minimum occurrence count
+a pattern needs before it's reported as a real `leak` / `marginal` / `fine`
+verdict; below that, it's labeled `insufficient_data` - never dropped from the
+report, just not called a leak. 3 was chosen (checked against the real database,
+confirmed with the user) when this feature was built against the 15-hand database
+that existed at the time: at 3, two patterns cleared the bar (`UTG raises` x6,
+`UTG turn bets` x3) while the rest stayed honestly unclassified; at 2, eleven
+patterns would have qualified - barely more reliable than a single hand; at 4+,
+almost nothing would have qualified yet, defeating the point of running this at
+all. Override it with `--min-sample` if you want a stricter or looser bar.
 
 Hero folds are excluded from grouping entirely: a fold's `ev_diff_bb` is always
 exactly `0.0` by construction (EV(fold) compared against itself), so it carries
 no EV signal to aggregate.
+
+With the database now at 64 hands (see "Per-stakes aggregation" below), the same
+threshold surfaces more: 35 of 85 total patterns clear the bar (1 `leak`, 5
+`marginal`, 29 `fine`), with 50 still `insufficient_data`. One real `leak` has
+since emerged that didn't exist in the original 15-hand analysis - `SB calls` (5
+occurrences, avg diff **-5.66bb**) - shown below alongside the current `UTG raises`
+pattern, which has grown from 6 to 10 occurrences but is still `marginal`
+(matching the finding written up in [WRITEUP.md](./WRITEUP.md)):
 
 ```bash
 python scripts/poker_cli.py leaks --db poker_hands.db
@@ -465,25 +468,30 @@ python scripts/poker_cli.py leaks --db poker_hands.db
 #
 # NOTE: a pattern (same position + action type, preflop or by street) needs at
 # least 3 occurrence(s) before its EV skew is reported as a real leak rather
-# than "insufficient data" - with only 15 hand(s) logged, most patterns won't
+# than "insufficient data" - with only 64 hand(s) logged, most patterns won't
 # clear that bar yet. Folds are excluded (no EV signal - see leaks/detector.py).
 #
 # Leaks (-EV across >= 3 occurrences):
 # -----------------------------------
-#   (none)
+#   SB calls               5 occurrences avg diff: -5.66bb   (-EV: 1  marginal: 0  +EV: 4)   hands: 14, 32, 34, 48, 57
 #
 # Marginal patterns (>= 3 occurrences):
 # ------------------------------------
-#   UTG raises             6 occurrences avg diff: +0.63bb   (-EV: 0  marginal: 6  +EV: 0)   hands: 2, 4, 7, 8, 9, 10
+#   MP calls               3 occurrences avg diff: +0.41bb   (-EV: 0  marginal: 2  +EV: 1)   hands: 41, 59
+#   UTG raises              10 occurrences avg diff: +0.65bb  (-EV: 0  marginal: 10  +EV: 0)  hands: 2, 4, 7, 8, 9, 10, 17, 33, 50, 61
+#   UTG+1 raises            3 occurrences avg diff: +0.67bb   (-EV: 0  marginal: 3  +EV: 0)   hands: 5, 47, 62
+#   HJ calls                4 occurrences avg diff: +0.83bb   (-EV: 0  marginal: 2  +EV: 2)   hands: 20, 40, 54
+#   HJ raises               4 occurrences avg diff: +0.96bb   (-EV: 0  marginal: 2  +EV: 2)   hands: 1, 24, 45, 54
 #
 # Fine patterns (+EV, >= 3 occurrences):
 # -------------------------------------
-#   UTG turn bets           3 occurrences avg diff: +10.61bb  (-EV: 0  marginal: 0  +EV: 3)   hands: 2, 4, 8
+#   MP raises               3 occurrences avg diff: +1.16bb   (-EV: 0  marginal: 1  +EV: 2)   hands: 36, 51, 53
+#   ... (26 more fine patterns)
 #
 # Insufficient data (< 3 occurrences - not a leak call yet):
 # -----------------------------------------------------------
-#   BB calls                1 occurrence  avg diff: -7.83bb   hands: 11
-#   ... (every other pattern - all still below the sample-size bar)
+#   BTN calls               2 occurrences avg diff: +0.10bb   hands: 25, 39
+#   ... (49 more patterns - all still below the sample-size bar)
 ```
 
 `--trials` and `--seed` control the same Monte Carlo equity simulation as
@@ -496,9 +504,11 @@ decisions pinning down the grouping key, the min-sample threshold (including a
 check that under-sampled patterns are correctly excluded from any leak/marginal/
 fine verdict), the leak/marginal/fine cutoffs, fold exclusion, and hand_id
 dedup/ordering - plus integration tests running the real EV engine against the
-actual 15 hands in `data/templates/real_hands.csv`, confirming `UTG raises` (6
-real occurrences) gets a real verdict while every thinner real pattern is
-labeled `insufficient_data`, never called a leak.
+15 hands in `data/templates/real_hands.csv` in isolation (a fixed, deliberately
+small fixture separate from the full 64-hand `poker_hands.db` shown above),
+confirming `UTG raises` (6 real occurrences in that fixture) gets a real verdict
+while every thinner real pattern is labeled `insufficient_data`, never called a
+leak.
 
 ## Session aggregation stats
 
@@ -673,6 +683,7 @@ Built so far:
       Carlo fallback" above for the threshold/precision tradeoff, measured before/
       after runtime, and the regression tests confirming no real hand's +EV/-EV/
       marginal flag changed
+- [x] Portfolio writeup ([WRITEUP.md](./WRITEUP.md))
 
 Not built yet (later sessions, per the project spec's build phases):
 
@@ -690,7 +701,6 @@ Not built yet (later sessions, per the project spec's build phases):
 - [ ] Preflop's own runtime (still always Monte Carlo, unaffected by this session's
       postflop fix - measured at ~70s of `ev-report`/`leaks`' total runtime either
       way; a possible target for a future session)
-- [ ] Portfolio writeup
 
 ## License
 

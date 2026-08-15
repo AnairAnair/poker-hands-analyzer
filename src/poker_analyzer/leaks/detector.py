@@ -12,15 +12,18 @@ happens here.
 
 Minimum sample size
 --------------------
-With only 15 hands in the database, most (position, street, action) patterns occur
-once or twice - nowhere near enough repetition to call a "leak" rather than one
-hand's noise. `MIN_SAMPLE_SIZE` (3, decided with the user after checking the real
-database: at 3, two patterns already clear the bar - UTG preflop raises x6 and UTG
-turn bets x3 - while the rest correctly stay unclassified; at 2 eleven patterns
-would qualify, which is barely more reliable than a single hand; at 4+ almost
-nothing would qualify yet, which defeats the point of running this at all) is the
-minimum occurrence count a pattern needs before its EV skew is reported as a real
-`leak` / `marginal` / `fine` verdict instead of `insufficient_data`.
+`MIN_SAMPLE_SIZE` (3) is the minimum occurrence count a pattern needs before its
+EV skew is reported as a real `leak` / `marginal` / `fine` verdict instead of
+`insufficient_data`. It was decided with the user after checking the real
+database that existed when this was built (15 hands, where most (position,
+street, action) patterns occur once or twice - nowhere near enough repetition to
+call a "leak" rather than one hand's noise): at 3, two patterns already cleared
+the bar - UTG preflop raises x6 and UTG turn bets x3 - while the rest correctly
+stayed unclassified; at 2 eleven patterns would have qualified, which is barely
+more reliable than a single hand; at 4+ almost nothing would have qualified yet,
+which defeats the point of running this at all. The database has since grown to
+64 hands (see README's "Per-stakes aggregation" section); at the same threshold
+of 3, 35 of 85 patterns now clear the bar, including one real `leak` (`SB calls`).
 
 Under-sampled patterns are never dropped from the results - only their verdict is
 withheld - so the report stays honest about what it doesn't know yet instead of
