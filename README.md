@@ -148,6 +148,86 @@ between two starting hands, given 0, 3, or 4 known board cards. It's validated i
 pytest
 ```
 
+### Postflop equity: Monte Carlo fallback
+
+`calculate_equity` has always fallen back from exact enumeration to Monte Carlo
+sampling once the number of possible board runouts gets too large to enumerate
+exhaustively (`EXACT_ENUMERATION_LIMIT` = 50,000 possible runouts) - a preflop
+(0-card) board needs a full 5-card runout (~1.7M combinations), always over the
+limit, so preflop equity has always used Monte Carlo. A flop/turn/river board's own
+runout count (at most 990, for a flop) is always well under the limit on its own,
+so a *single* postflop hand-vs-hand comparison has always been evaluated exactly.
+
+The problem: postflop EV doesn't call `calculate_equity` once - `ev/engine.py`'s
+`equity_vs_range` calls it once per combo in an opponent's range, then averages the
+results. A wide range (a raw position-based open can run 200-450 combos) turns into
+hundreds of *exact* 990-runout enumerations for a single decision - measured at
+~25ms per combo, a single wide flop decision could cost several seconds, and
+`ev-report`/`leaks` run this across every postflop decision in the database, which
+is what made both take several minutes (the known issue from a previous session).
+
+**The fix:** `calculate_equity` now takes a `range_width` parameter (default 1,
+preserving all prior single-hand-pair behavior). `equity_vs_range` passes
+`range_width=len(villain_range_combos)` on every call, and the exact-vs-Monte-Carlo
+decision is now based on `runouts * range_width` against the *same*
+`EXACT_ENUMERATION_LIMIT` (50,000) preflop already used, rather than a call's own
+runout count in isolation - one threshold, one source of truth, instead of a second
+constant to keep in sync. In practice this means:
+
+| Street | Runouts | Falls back to Monte Carlo once range width exceeds |
+|--------|---------|------------------------------------------------------|
+| Flop   | 990     | ~50 combos - true of nearly every realistic flop range |
+| Turn   | 44      | ~1,136 combos - essentially never (max possible range is 1,326 combos) |
+| River  | 1       | never - a single direct comparison is always cheap regardless of range width |
+
+This was a real design decision with more than one reasonable approach (decided
+with the user, via a threshold and a sample-count question, same as every other
+tradeoff in this project): the threshold could have been a new, separate constant
+tuned specifically for the combined "runouts x range width" budget, and the
+fallback's trial count could have been raised above what preflop already uses, for
+better precision on the (now much more common) postflop Monte Carlo path. Both were
+set aside in favor of reusing what already existed - `EXACT_ENUMERATION_LIMIT`
+(50,000) as the combined threshold, and `DEFAULT_TRIALS_PER_COMBO` (300 trials per
+combo, unchanged) as the sample count - because introducing new tuned constants
+without a specific reason to distrust the existing ones would just be two thresholds
+doing the same conceptual job, and because the regression tests below confirmed 300
+trials is already precise enough not to move any real decision's flag.
+
+**Known limitation, explicitly - the precision/speed tradeoff:** Monte Carlo
+sampling is an *estimate*, not an exact answer. At 300 trials per combo, a single
+combo's own equity estimate carries roughly +/-3 percentage points of sampling
+noise (standard error for a proportion at n=300); averaging across a whole range's
+many combos smooths this further, and measured against real hands in this project's
+database, the fallback's decision-level equity landed within about half a point of
+the exact value in practice (see `test_monte_carlo_fallback_matches_exact_flags_on_every_real_postflop_decision`
+in `tests/test_ev_engine.py`) - comfortably inside the tolerance needed to avoid
+flipping a `+EV`/`-EV`/`marginal` flag (`MARGINAL_THRESHOLD_BB` = 1.0bb) for every
+decision in the current 15-hand database, but not a mathematical guarantee for
+every possible future hand. A borderline decision sitting extremely close to the
+marginal threshold could, in principle, land on the other side of it under Monte
+Carlo sampling where exact enumeration would not - the same caveat that already
+applies to every preflop decision, which has used Monte Carlo since before this
+session. Raising the trial count (via `--trials`) trades speed back for precision
+if a specific decision's flag is ever in doubt.
+
+**Measured runtime, same 15-hand database used throughout this project, `--trials
+300 --seed 42`:**
+
+| Command | Before | After |
+|---------|--------|-------|
+| `ev-report` | 3m 33s | 2m 3s |
+| `leaks` | 3m 27s | 2m 4s |
+
+Note this isn't the full picture of postflop's own speedup: `ev-report`/`leaks`
+also run the *preflop* engine, which was already Monte Carlo before this session
+and is unaffected by this change - profiling showed preflop alone accounts for
+roughly 70s of the total either way. Isolating just the postflop portion (instrumenting
+exact vs. Monte Carlo call counts directly) showed postflop dropping from
+roughly 140s to about 44s, a ~3.2x speedup, consistent with the ~25ms-exact vs.
+~8ms-Monte-Carlo per-combo timings measured directly against `calculate_equity`.
+Preflop's own runtime is unchanged and out of scope for this session - a possible
+target for a future one.
+
 ## Preflop EV engine
 
 `src/poker_analyzer/ev/` computes decision-level EV for hero's preflop actions
@@ -528,6 +608,14 @@ Built so far:
       charts, preflop +EV/-EV/marginal breakdown, per-session summary table, all
       wrapping `stats/aggregator.py` and `ev/engine.py` rather than recomputing;
       data-shaping layer (`dashboard/data_prep.py`) covered by pytest
+- [x] Postflop equity's Monte Carlo fallback (`calculate_equity`'s `range_width`
+      parameter, wired through `equity_vs_range`) - the exact-enumeration path is no
+      longer used for every postflop decision regardless of range width; falls back
+      to the same Monte Carlo sampling preflop already used once `runouts *
+      range_width` crosses `EXACT_ENUMERATION_LIMIT` - see "Postflop equity: Monte
+      Carlo fallback" above for the threshold/precision tradeoff, measured before/
+      after runtime, and the regression tests confirming no real hand's +EV/-EV/
+      marginal flag changed
 
 Not built yet (later sessions, per the project spec's build phases):
 
@@ -542,8 +630,9 @@ Not built yet (later sessions, per the project spec's build phases):
       decisions - `ev-report` already prints both)
 - [ ] Wiring leak detection into the dashboard (CLI-only for now, see `leaks`
       above)
-- [ ] `ev-report`'s known runtime slowdown (separate future session, not
-      leak-detection scope)
+- [ ] Preflop's own runtime (still always Monte Carlo, unaffected by this session's
+      postflop fix - measured at ~70s of `ev-report`/`leaks`' total runtime either
+      way; a possible target for a future session)
 - [ ] Portfolio writeup
 
 ## License

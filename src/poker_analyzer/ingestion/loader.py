@@ -35,7 +35,9 @@ from typing import Iterable
 
 from poker_analyzer.validation.validator import validate_hand_log_csv
 
-ACTION_TOKEN_RE = re.compile(r"^(?P<position>[A-Za-z0-9+]+):(?P<type>fold|check|call|bet|raise)(?P<amount>\d+(?:\.\d+)?)?$")
+ACTION_TOKEN_RE = re.compile(
+    r"^(?P<position>[A-Za-z0-9+]+):(?P<type>fold|check|call|bet|raise|allin)(?P<amount>\d+(?:\.\d+)?)?$"
+)
 
 STREET_COLUMNS = {
     "preflop": "preflop_actions",
@@ -43,6 +45,11 @@ STREET_COLUMNS = {
     "turn": "turn_actions",
     "river": "river_actions",
 }
+
+# Preflop's first bet-facing amount is the big blind itself (no "bet" action is ever
+# logged for it); postflop streets start with no bet in front of anyone. Matches
+# ev/engine.py's own SB_POST_BB/BB_POST_BB-seeded reconstruction.
+_PREFLOP_STARTING_BET_BB = 1.0
 
 
 class IngestionError(Exception):
@@ -62,21 +69,52 @@ def _big_blind_cents_from_stakes(stakes: str) -> int:
 
 
 def _parse_action_string(action_str: str, street: str) -> list[dict]:
+    """
+    'allin' isn't stored as its own action_type - it's a stack-size modifier on
+    whichever of bet/raise/call it actually is, and the schema/EV engine only know
+    those five canonical action types (see db/schema.sql's CHECK constraint and
+    ev/engine.py's action_type dispatch). So an 'allin<amount>' token is classified
+    here, at parse time, by comparing its (always-total, same convention as bet/raise
+    tokens) amount against the street's running current_bet: exceeding it is
+    aggression (a bet if nothing's been bet yet this street, else a raise - same
+    "bet vs. raise" distinction the postflop range-narrowing in ev/engine.py relies
+    on); not exceeding it is a call, including a short-stacked call-for-less that
+    creates a side pot (this loader's cost/pot reconstruction doesn't model side
+    pots - see the module docstring - so a covered call-for-less is still recorded
+    as a plain 'call', same simplification a literal 'call' token already gets).
+    """
     if not action_str:
         return []
     actions = []
+    current_bet = _PREFLOP_STARTING_BET_BB if street == "preflop" else 0.0
     for order, token in enumerate(action_str.split(">"), start=1):
         match = ACTION_TOKEN_RE.match(token)
         if not match:
             raise IngestionError(f"Malformed action token '{token}' in {street} actions")
+        raw_type = match.group("type")
         amount = match.group("amount")
+        amount_bb = float(amount) if amount else None
+
+        if raw_type == "allin":
+            if amount_bb is None:
+                raise IngestionError(f"'allin' action token '{token}' in {street} actions is missing an amount")
+            if amount_bb > current_bet:
+                action_type = "bet" if current_bet == 0.0 else "raise"
+            else:
+                action_type = "call"
+        else:
+            action_type = raw_type
+
+        if action_type in ("bet", "raise"):
+            current_bet = amount_bb
+
         actions.append(
             {
                 "street": street,
                 "action_order": order,
                 "actor_position": match.group("position"),
-                "action_type": match.group("type"),
-                "amount_bb": float(amount) if amount else None,
+                "action_type": action_type,
+                "amount_bb": amount_bb,
                 "pot_before_bb": None,  # see module docstring
             }
         )

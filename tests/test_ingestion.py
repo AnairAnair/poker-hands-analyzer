@@ -110,3 +110,36 @@ def test_action_strings_parsed_into_actions_table(tmp_path):
     assert ("preflop", "UTG", "fold", None) in actions
     assert ("preflop", "CO", "raise", 2.5) in actions
     assert ("flop", "CO", "bet", 4.0) in actions
+
+
+def test_allin_tokens_classified_by_amount_vs_current_bet(tmp_path):
+    """
+    'allin' isn't a stored action_type - it's classified into bet/raise/call by
+    comparing its amount to the street's running current_bet: opening from no bet
+    is a 'bet', exceeding an existing bet is a 'raise', and shoving for at or below
+    the current bet (a covered call-for-less) is a 'call'.
+    """
+    db_path = tmp_path / "poker.db"
+    init_db(db_path)
+    csv_path = _write_csv(
+        tmp_path,
+        [
+            "2026-08-05,The Brook,1/3,1,6,CO,Ah Kd,100,"
+            "UTG:raise4>CO:allin50,Jh 8h 3c,BB:check>CO:allin20>BTN:raise60>CO:allin20,,,,,17,8,0,",
+        ],
+    )
+
+    load_hand_log_csv(csv_path, db_path)
+
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    actions = conn.execute(
+        "SELECT street, actor_position, action_type, amount_bb FROM actions ORDER BY street, action_order"
+    ).fetchall()
+    # Preflop: CO's allin (50) exceeds UTG's raise (4) -> raise.
+    assert ("preflop", "CO", "raise", 50.0) in actions
+    # Flop: CO's first allin (20) opens from a check -> bet.
+    assert ("flop", "CO", "bet", 20.0) in actions
+    # Flop: CO's second allin (20) is covered under BTN's raise (60) -> call.
+    assert ("flop", "CO", "call", 20.0) in actions

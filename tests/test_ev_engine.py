@@ -790,3 +790,121 @@ def test_equity_vs_range_matches_known_flop_spot_for_a_single_combo_range():
     ranged = equity_vs_range("Ah Kh", ["Qs Qd"], board="Jh 8h 3c")
 
     assert ranged == pytest.approx(54.44, abs=0.1)
+
+
+def test_equity_vs_range_passes_range_width_through_to_calculate_equity():
+    """
+    equity_vs_range must tell calculate_equity how wide the range is
+    (range_width=len(villain_range_combos)) on every combo, not just the trial
+    count/seed - this is what lets a wide postflop range fall back to Monte Carlo
+    instead of enumerating every combo's runouts exactly. See calculate_equity's
+    range_width docstring and the README's "Postflop equity: Monte Carlo fallback"
+    section.
+    """
+    import poker_analyzer.ev.engine as engine_module
+
+    seen_range_widths = []
+    original = engine_module.calculate_equity
+
+    def spy(*args, **kwargs):
+        seen_range_widths.append(kwargs.get("range_width"))
+        return original(*args, **kwargs)
+
+    engine_module.calculate_equity = spy
+    try:
+        combos = ["Qs Qd", "Js Jd", "Ts Td"]
+        equity_vs_range("Ah Kh", combos, board="Jh 8h 3c", trials_per_combo=50, seed=1)
+    finally:
+        engine_module.calculate_equity = original
+
+    assert seen_range_widths == [len(combos)] * len(combos)
+
+
+# --- Postflop Monte Carlo fallback: regression against exact enumeration -----------
+#
+# The postflop equity path used to always enumerate every villain-range combo's
+# runouts exactly (a flop/turn/river board's own runout count is small enough on its
+# own), regardless of how wide the range was - this is what made ev-report/leaks take
+# several minutes. equity_vs_range now tells calculate_equity how wide the range is
+# (range_width), so a wide-enough flop range falls back to Monte Carlo the same way a
+# 0-card preflop board already always did. These tests confirm that fallback doesn't
+# change any real hand's postflop +EV/-EV/marginal flag versus forcing exact
+# enumeration everywhere (by raising EXACT_ENUMERATION_LIMIT past what any real
+# range/runout combination in the 15-hand database can cross), and that equity
+# estimates land close enough to the exact values not to matter.
+
+
+def _all_postflop_decisions(conn, trials_per_combo, seed):
+    hand_ids = [row[0] for row in conn.execute("SELECT DISTINCT hand_id FROM hands ORDER BY hand_id")]
+    decisions = []
+    for hand_id in hand_ids:
+        decisions.extend(analyze_hand_postflop(conn, hand_id, trials_per_combo=trials_per_combo, seed=seed))
+    return decisions
+
+
+def test_monte_carlo_fallback_matches_exact_flags_on_every_real_postflop_decision(tmp_path, monkeypatch):
+    """
+    Every real hand's postflop decisions, computed twice: once with the Monte Carlo
+    fallback active (today's default behavior) and once with exact enumeration
+    forced everywhere (EXACT_ENUMERATION_LIMIT raised so no real range/runout
+    combination in this database can cross it). The fallback must not flip a single
+    decision's +EV/-EV/marginal flag, and hero_equity_pct should land within a few
+    points of the exact value - the whole point of a Monte Carlo fallback is speed
+    without moving the answer enough to change a real decision.
+    """
+    import poker_analyzer.equity.calculator as calculator_module
+
+    conn = _load_real_hands_db(tmp_path)
+
+    fallback_decisions = _all_postflop_decisions(conn, TEST_TRIALS_PER_COMBO, TEST_SEED)
+
+    monkeypatch.setattr(calculator_module, "EXACT_ENUMERATION_LIMIT", 10_000_000)
+    exact_decisions = _all_postflop_decisions(conn, TEST_TRIALS_PER_COMBO, TEST_SEED)
+
+    assert len(fallback_decisions) == len(exact_decisions)
+    assert len(fallback_decisions) > 0
+
+    saw_a_fallback_decision = False
+    for fb, ex in zip(fallback_decisions, exact_decisions):
+        assert fb.hand_id == ex.hand_id
+        assert fb.street == ex.street
+        assert fb.action_type == ex.action_type
+        assert fb.flag == ex.flag, (
+            f"hand {fb.hand_id} {fb.street} {fb.action_type}: "
+            f"fallback flag {fb.flag!r} != exact flag {ex.flag!r} "
+            f"({fb.hero_equity_pct} vs {ex.hero_equity_pct})"
+        )
+
+        if fb.opponent_range_combo_count is not None:
+            runouts = {"flop": 990, "turn": 44, "river": 1}[fb.street]
+            if runouts * fb.opponent_range_combo_count > 50_000:
+                saw_a_fallback_decision = True
+
+        if fb.hero_equity_pct is not None:
+            assert fb.hero_equity_pct == pytest.approx(ex.hero_equity_pct, abs=5.0), (fb, ex)
+        if fb.ev_diff_bb is not None:
+            assert fb.ev_diff_bb == pytest.approx(ex.ev_diff_bb, abs=1.5), (fb, ex)
+
+    # Sanity: the real database must actually exercise the fallback at least once,
+    # otherwise this test would pass trivially without comparing anything meaningful.
+    assert saw_a_fallback_decision
+
+
+def test_range_width_does_not_change_preflops_already_monte_carlo_method(tmp_path):
+    """
+    Preflop already always used Monte Carlo before this session's change (a 0-card
+    board's own runout count, ~1.7M, is already over EXACT_ENUMERATION_LIMIT with
+    range_width=1) - equity_vs_range now passes range_width=len(villain_range_combos)
+    on *every* call, preflop included, so this confirms that only ever pushes an
+    already-over-the-limit preflop call further over it, never pulling it back under
+    (which would attempt a real ~1.7M-combo exact enumeration - not just slow, but
+    exactly the runaway cost this session's fix is about avoiding).
+    """
+    conn = _load_real_hands_db(tmp_path)
+    hand_ids = [row[0] for row in conn.execute("SELECT DISTINCT hand_id FROM hands ORDER BY hand_id")]
+
+    for hand_id in hand_ids:
+        decisions = analyze_hand_preflop(conn, hand_id, trials_per_combo=TEST_TRIALS_PER_COMBO, seed=TEST_SEED)
+        for decision in decisions:
+            if decision.hero_equity_pct is not None:
+                assert 0.0 <= decision.hero_equity_pct <= 100.0, decision

@@ -30,7 +30,7 @@ REQUIRED_COLUMNS = [
 VALID_POSITIONS = {"UTG", "UTG+1", "MP", "HJ", "CO", "BTN", "SB", "BB"}
 VALID_RANKS = set("23456789TJQKA")
 VALID_SUITS = set("shdc")
-ACTION_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9+]+:(fold|check|call|bet|raise)(?:\d+(?:\.\d+)?)?$")
+ACTION_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9+]+:(fold|check|call|bet|raise|allin)(?:\d+(?:\.\d+)?)?$")
 
 
 def _is_valid_date(value: str) -> bool:

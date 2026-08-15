@@ -6,7 +6,7 @@ These tests exist to confirm the treys integration produces correct numbers, not
 to test treys itself.
 """
 
-from poker_analyzer.equity.calculator import calculate_equity
+from poker_analyzer.equity.calculator import EXACT_ENUMERATION_LIMIT, calculate_equity
 
 
 def test_aa_vs_kk_preflop():
@@ -120,3 +120,99 @@ def test_rejects_overlapping_cards():
 
     with pytest.raises(ValueError):
         calculate_equity(hero="As Kd", villain="As Qc", board="")
+
+
+# --- range_width: the postflop Monte Carlo fallback ---------------------------------
+#
+# range_width lets a caller that's about to make many calculate_equity calls
+# back-to-back (one per combo in an opponent's range - see ev/engine.py's
+# equity_vs_range) inform the exact-vs-Monte-Carlo decision with "runouts *
+# range_width" instead of just this call's own runout count. Preflop already always
+# falls back on its own (a 0-card board's runout count alone is ~1.7M, over
+# EXACT_ENUMERATION_LIMIT regardless of range_width) - these tests cover the new
+# postflop case, where a single call's own runout count (<=990) is small but a wide
+# range multiplies it past the limit.
+
+
+def test_range_width_of_one_leaves_a_flop_board_exact():
+    """
+    range_width defaults to 1 - a single hand-pair comparison on a flop board
+    (990 runouts, well under EXACT_ENUMERATION_LIMIT on its own) must stay exact,
+    unchanged from before range_width existed.
+    """
+    result = calculate_equity(hero="Ah Kh", villain="Qs Qd", board="Jh 8h 3c")
+
+    assert result.method == "exact"
+    assert result.trials == 990
+
+
+def test_range_width_wide_enough_to_cross_the_limit_falls_back_to_monte_carlo():
+    """
+    990 runouts * 100 combos = 99,000, over EXACT_ENUMERATION_LIMIT - a wide enough
+    range must fall back to Monte Carlo even though this single hand-pair comparison
+    would be cheap to enumerate exactly on its own (the same board, same hands, same
+    runout count as test_flush_draw_and_overcards_vs_overpair_on_flop above, which
+    gets an exact answer at range_width=1).
+    """
+    result = calculate_equity(
+        hero="Ah Kh", villain="Qs Qd", board="Jh 8h 3c", range_width=100, trials=20_000, seed=42
+    )
+
+    assert result.method == "monte_carlo"
+    assert result.trials == 20_000
+
+
+def test_range_width_monte_carlo_fallback_lands_close_to_the_known_exact_value():
+    """
+    Same flush-draw-vs-overpair spot as test_flush_draw_and_overcards_vs_overpair_on_flop
+    (exact answer: 54.44% / 45.56%), forced into the Monte Carlo fallback via a wide
+    range_width - the whole point of this fallback is speed *without* moving the
+    answer enough to matter, so it should still land close to the exact value at a
+    reasonably large trial count.
+    """
+    result = calculate_equity(
+        hero="Ah Kh", villain="Qs Qd", board="Jh 8h 3c", range_width=100, trials=20_000, seed=42
+    )
+
+    assert result.method == "monte_carlo"
+    assert abs(result.hero_equity - 54.44) < 2.0, result
+    assert abs(result.villain_equity - 45.56) < 2.0, result
+
+
+def test_range_width_does_not_affect_a_board_already_over_the_limit_alone():
+    """
+    A preflop (0-card) board is already over EXACT_ENUMERATION_LIMIT on its own
+    (~1.7M runouts) - range_width=1 (the default, matching a single equity_vs_range
+    combo call) must still fall back to Monte Carlo, same as before range_width
+    existed.
+    """
+    result = calculate_equity(hero="As Ad", villain="Ks Kc", trials=1000, seed=1, range_width=1)
+
+    assert result.method == "monte_carlo"
+
+
+def test_range_width_boundary_matches_exact_enumeration_limit_constant():
+    """
+    The boundary itself: runouts * range_width == EXACT_ENUMERATION_LIMIT exactly
+    should still take the exact path (<=, not <), and one combo over the boundary
+    should fall back - pins down the off-by-one behavior directly against the real
+    constant rather than a hardcoded number.
+    """
+    runouts = 990
+    boundary_width = EXACT_ENUMERATION_LIMIT // runouts  # 50 (990 * 50 = 49,500 <= 50,000)
+    at_boundary = calculate_equity(
+        hero="Ah Kh", villain="Qs Qd", board="Jh 8h 3c", range_width=boundary_width
+    )
+    assert at_boundary.method == "exact"
+
+    over_boundary_width = (EXACT_ENUMERATION_LIMIT // runouts) + 1
+    if runouts * over_boundary_width > EXACT_ENUMERATION_LIMIT:
+        over_boundary = calculate_equity(
+            hero="Ah Kh",
+            villain="Qs Qd",
+            board="Jh 8h 3c",
+            range_width=over_boundary_width,
+            trials=1000,
+            seed=1,
+        )
+        assert over_boundary.method == "monte_carlo"

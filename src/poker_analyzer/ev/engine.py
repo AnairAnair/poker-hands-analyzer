@@ -267,15 +267,27 @@ def equity_vs_range(
     Average hero's equity across every combo in an opponent's range. `board` is 0
     (preflop), 3 (flop), or 4 (turn) known cards, passed straight through to
     `calculate_equity` - empty by default, so preflop callers are unaffected.
+
+    Passes `range_width=len(villain_range_combos)` through to `calculate_equity` on
+    every combo, so a wide postflop range falls back to Monte Carlo sampling instead
+    of exact enumeration per combo, the same way a preflop board (with no known
+    cards) already always does - see `calculate_equity`'s `range_width` docstring
+    and the README's "Postflop equity: Monte Carlo fallback" section.
     """
     if not villain_range_combos:
         raise EVEngineError("Opponent range is empty - can't compute equity against it")
 
+    range_width = len(villain_range_combos)
     total = 0.0
     for index, combo in enumerate(villain_range_combos):
         combo_seed = seed + index if seed is not None else None
         result = calculate_equity(
-            hero_hole_cards, combo, board=board, trials=trials_per_combo, seed=combo_seed
+            hero_hole_cards,
+            combo,
+            board=board,
+            trials=trials_per_combo,
+            seed=combo_seed,
+            range_width=range_width,
         )
         total += result.hero_equity
     return total / len(villain_range_combos)

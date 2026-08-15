@@ -10,12 +10,20 @@ come out. This module does that:
   board - a river board has exactly one "runout", the empty one, so it's a direct
   hand comparison), it enumerates every remaining combination exhaustively and
   returns an exact answer.
-- When it's large (a 0-card preflop board needs a full 5-card runout, ~1.7M
-  combinations), exhaustive enumeration is too slow to be practical, so it falls
-  back to Monte Carlo sampling instead.
+- When it's large, exhaustive enumeration is too slow to be practical, so it falls
+  back to Monte Carlo sampling instead. A 0-card preflop board needs a full 5-card
+  runout (~1.7M combinations) and always crosses this on its own. A flop/turn/river
+  board's own runout count is small (at most 990), but this module is also called
+  once per combo when averaging equity across an opponent's whole range
+  (`ev/engine.py`'s `equity_vs_range`), and a wide range can multiply that small
+  per-combo runout count into a lot of total work - see `range_width` below and
+  "Postflop equity: Monte Carlo fallback" in the project README.
 
-This only handles a single hero hand vs. a single villain hand (heads-up), which
-matches the spec's v1 scope (no multiway equity, no opponent ranges yet).
+This only handles a single hero hand vs. a single villain hand (heads-up) per call,
+which matches the spec's v1 scope (no multiway equity) - `range_width` lets a caller
+that's about to make many such calls back-to-back (one per combo in a range) inform
+the exact-vs-Monte-Carlo decision without this module needing to know about ranges
+itself.
 """
 
 from __future__ import annotations
@@ -32,13 +40,20 @@ _evaluator = Evaluator()
 
 CardsArg = Union[str, Sequence[str]]
 
-# Above this many possible board runouts, exhaustive enumeration is abandoned in
-# favor of Monte Carlo sampling. A flop board (2 cards to come, 4 hole cards known)
-# has at most C(46, 2) = 1,035 runouts and a turn board (1 card to come) has at
-# most 45 - well under this limit, so both are always evaluated exactly. A preflop
-# board (5 cards to come, only 4 hole cards known) has C(48, 5) = 1,712,304
-# runouts, which is over the limit, so preflop equity always falls back to Monte
-# Carlo.
+# Above this many possible board runouts - multiplied by `range_width`, see below -
+# exhaustive enumeration is abandoned in favor of Monte Carlo sampling. A flop board
+# (2 cards to come, 4 hole cards known) has at most C(46, 2) = 1,035 runouts and a
+# turn board (1 card to come) has at most 45 - both well under this limit for a
+# single hand pair (range_width=1), so a single flop/turn/river comparison is always
+# evaluated exactly. A preflop board (5 cards to come, only 4 hole cards known) has
+# C(48, 5) = 1,712,304 runouts, which is over the limit on its own, so preflop
+# equity always falls back to Monte Carlo regardless of range_width.
+#
+# This same 50,000 limit is reused, unscaled, as the combined "runouts x
+# range_width" budget - see `range_width`'s docstring below and the README's
+# "Postflop equity: Monte Carlo fallback" section for the reasoning (single source
+# of truth for what "too slow to enumerate exactly" means, rather than a second
+# threshold to keep in sync).
 EXACT_ENUMERATION_LIMIT = 50_000
 
 DEFAULT_MONTE_CARLO_TRIALS = 50_000
@@ -79,6 +94,7 @@ def calculate_equity(
     board: CardsArg = "",
     trials: int = DEFAULT_MONTE_CARLO_TRIALS,
     seed: int | None = None,
+    range_width: int = 1,
 ) -> EquityResult:
     """
     Calculate heads-up equity between two starting hands.
@@ -90,9 +106,18 @@ def calculate_equity(
         come back as 0 or 100 (or split 50/50 on a tie), same shape as any other
         board size, just with only one possible "runout" (the empty one).
     trials: Monte Carlo sample size, only used when exhaustive enumeration isn't
-        feasible (i.e. only for a 0-card/preflop board). Ignored otherwise.
+        feasible. Ignored otherwise.
     seed: RNG seed for Monte Carlo sampling, for reproducible results in tests.
         Ignored when exact enumeration is used.
+    range_width: how many equivalent calls a caller is about to make back-to-back
+        (e.g. one per combo when averaging equity against a whole opponent range -
+        see `ev/engine.py`'s `equity_vs_range`). This single call still only
+        evaluates `hero` vs. `villain`, but the exact-vs-Monte-Carlo decision is
+        based on `runouts * range_width` rather than just this call's own runout
+        count, so a wide range falls back to sampling even on a flop/turn/river
+        board where any single hand-pair comparison would be cheap to enumerate
+        exactly. Defaults to 1 (this call's own runout count decides, unchanged
+        from before this parameter existed) for direct single-hand-pair callers.
     """
     hero_cards = parse_cards(hero)
     villain_cards = parse_cards(villain)
@@ -116,7 +141,7 @@ def calculate_equity(
     cards_needed = 5 - len(board_cards)
     num_combos = comb(len(remaining), cards_needed)
 
-    if num_combos <= EXACT_ENUMERATION_LIMIT:
+    if num_combos * range_width <= EXACT_ENUMERATION_LIMIT:
         return _exact_equity(hero_cards, villain_cards, board_cards, remaining, cards_needed)
     return _monte_carlo_equity(
         hero_cards, villain_cards, board_cards, remaining, cards_needed, trials, seed
