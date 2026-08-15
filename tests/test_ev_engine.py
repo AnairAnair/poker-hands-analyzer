@@ -11,12 +11,18 @@ Several kinds of coverage, per the task:
 - Direct unit tests of the fold-equity math (`estimate_fold_pct`, `_continuing_band`)
   in isolation, since the end-to-end textbook/real-hand tests only exercise it bundled
   together with equity simulation and can't pin down the fold-equity arithmetic itself.
+  These same helpers are reused unchanged by postflop fold equity, so they cover both.
 - Direct unit tests of the postflop range-narrowing replay (`_reconstruct_postflop_street`)
   in isolation, for the same reason - pinning down exactly which actions narrow the band
   and by how much, independent of equity simulation.
 - Real hands and a constructed textbook postflop spot (reusing the flush-draw-vs-tight-
   range flop example already validated directly against `calculate_equity` in
   tests/test_equity_calculator.py) for `analyze_hand_postflop`.
+- Postflop fold equity: real hands re-verified against their own pre-fold-equity
+  (full-range showdown) numbers to confirm a bet/raise that likely won the pot
+  outright now shows clearly higher EV, plus a direct check that postflop bet/raise
+  decisions populate `fold_pct`/`continuing_range_band` using the exact same
+  `estimate_fold_pct`/`_continuing_band` calls preflop already uses.
 """
 
 from pathlib import Path
@@ -422,6 +428,39 @@ def test_bet_and_raise_decisions_populate_fold_equity_fields_call_and_check_do_n
     assert decision.continuing_range_band is None
 
 
+def test_postflop_bet_and_raise_decisions_populate_fold_equity_fields_call_does_not(tmp_path):
+    """
+    Same convention check as the preflop test above, for postflop. Hand 13 gives all
+    three action types across its three streets in one real hand: flop is a call
+    (BB:call - no fold equity), turn is a bet (BB:bet5), river is a raise
+    (BB:raise27.5) - so this pins down that postflop bet/raise decisions reuse the
+    exact preflop fold-equity formula (`estimate_fold_pct`) while a call still leaves
+    fold_pct/continuing_range_band unpopulated, exactly like preflop.
+    """
+    conn = _load_real_hands_db(tmp_path)
+    decisions = analyze_hand_postflop(conn, hand_id=13, trials_per_combo=TEST_TRIALS_PER_COMBO, seed=TEST_SEED)
+    conn.close()
+
+    by_street = {d.street: d for d in decisions}
+
+    flop = by_street["flop"]
+    assert flop.action_type == "call"
+    assert flop.fold_pct is None
+    assert flop.continuing_range_band is None
+
+    turn = by_street["turn"]
+    assert turn.action_type == "bet"
+    assert turn.fold_pct == pytest.approx(turn.cost_bb / (turn.pot_before_bb + turn.cost_bb))
+    assert turn.continuing_range_band[0] == turn.opponent_range_band[0]
+    assert turn.continuing_range_band[1] < turn.opponent_range_band[1]
+
+    river = by_street["river"]
+    assert river.action_type == "raise"
+    assert river.fold_pct == pytest.approx(river.cost_bb / (river.pot_before_bb + river.cost_bb))
+    assert river.continuing_range_band[0] == river.opponent_range_band[0]
+    assert river.continuing_range_band[1] <= river.opponent_range_band[1]
+
+
 # --- Postflop range-narrowing replay (ev/engine.py's _reconstruct_postflop_street) --
 #
 # Direct unit tests of the postflop narrowing rules in isolation, independent of
@@ -542,10 +581,87 @@ def test_real_hand_flopped_trip_aces_is_plus_ev_every_street(tmp_path):
         assert decision.hero_position == "BB"
         assert decision.hero_equity_pct > 85.0, decision
         assert decision.flag == "+EV", decision
+        # Flop is a raise, turn and river are bets - every street here has fold equity.
+        assert decision.fold_pct == pytest.approx(
+            decision.cost_bb / (decision.pot_before_bb + decision.cost_bb)
+        ), decision
+        assert decision.continuing_range_band[1] <= decision.opponent_range_band[1], decision
     # Board (dead cards for range assignment) should grow one card at a time.
     assert decisions[0].board == "Jc 5h Ad"
     assert decisions[1].board == "Jc 5h Ad 4s"
     assert decisions[2].board == "Jc 5h Ad 4s 3c"
+
+
+def test_real_hand_flopped_trip_aces_flop_raise_beats_pre_fold_equity_showdown_number(tmp_path):
+    """
+    Re-verification per the task: a real postflop bet/raise that likely won the pot
+    outright should now show clearly higher EV than the old showdown-only number.
+
+    Hand 3's flop decision is hero raising a flopped set of aces. Recomputes the
+    pre-fold-equity number directly - equity against the FULL (unnarrowed)
+    opponent_range_band, exactly the formula every postflop bet/raise used before
+    fold equity was added - and checks the new fold-equity-aware ev_action_bb comes
+    back higher, since folding out part of villain's range on top of already-strong
+    showdown equity can only add value here (not subtract it).
+    """
+    conn = _load_real_hands_db(tmp_path)
+    decisions = analyze_hand_postflop(conn, hand_id=3, trials_per_combo=TEST_TRIALS_PER_COMBO, seed=TEST_SEED)
+    conn.close()
+
+    flop_decision = decisions[0]
+    assert flop_decision.street == "flop"
+    assert flop_decision.action_type == "raise"
+    assert flop_decision.fold_pct is not None and flop_decision.fold_pct > 0.0
+
+    full_band_combos = range_combos_for_band(
+        flop_decision.opponent_range_band[0],
+        flop_decision.opponent_range_band[1],
+        dead_cards=f"Ac Ah {flop_decision.board}",
+    )
+    old_equity_pct = equity_vs_range(
+        "Ac Ah",
+        full_band_combos,
+        board=flop_decision.board,
+        trials_per_combo=TEST_TRIALS_PER_COMBO,
+        seed=TEST_SEED,
+    )
+    pot_after = flop_decision.pot_before_bb + flop_decision.cost_bb
+    old_ev = (old_equity_pct / 100.0) * pot_after - flop_decision.cost_bb
+
+    assert flop_decision.ev_action_bb > old_ev, (flop_decision, old_ev)
+
+
+def test_real_hand_flop_cbet_with_top_pair_beats_pre_fold_equity_showdown_number(tmp_path):
+    """
+    Second real-hand re-verification: hand 4's flop decision is hero (UTG, As Kd)
+    betting 5bb into a small pot. Same comparison as above - the new fold-equity-aware
+    EV should come back higher than the pre-fold-equity full-range showdown number.
+    """
+    conn = _load_real_hands_db(tmp_path)
+    decisions = analyze_hand_postflop(conn, hand_id=4, trials_per_combo=TEST_TRIALS_PER_COMBO, seed=TEST_SEED)
+    conn.close()
+
+    flop_decision = decisions[0]
+    assert flop_decision.street == "flop"
+    assert flop_decision.action_type == "bet"
+    assert flop_decision.fold_pct is not None and flop_decision.fold_pct > 0.0
+
+    full_band_combos = range_combos_for_band(
+        flop_decision.opponent_range_band[0],
+        flop_decision.opponent_range_band[1],
+        dead_cards=f"As Kd {flop_decision.board}",
+    )
+    old_equity_pct = equity_vs_range(
+        "As Kd",
+        full_band_combos,
+        board=flop_decision.board,
+        trials_per_combo=TEST_TRIALS_PER_COMBO,
+        seed=TEST_SEED,
+    )
+    pot_after = flop_decision.pot_before_bb + flop_decision.cost_bb
+    old_ev = (old_equity_pct / 100.0) * pot_after - flop_decision.cost_bb
+
+    assert flop_decision.ev_action_bb > old_ev, (flop_decision, old_ev)
 
 
 def test_real_hand_river_nut_flush_is_a_lock_and_flags_plus_ev(tmp_path):

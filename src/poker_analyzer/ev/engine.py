@@ -107,13 +107,31 @@ actions. Two things differ from the preflop path:
    are also excluded as dead cards when enumerating villain's range combos, alongside
    hero's own hole cards, since villain can't hold a card that's face-up on the board.
 
-Postflop fold equity (a bet/raise folding out worse hands, the same way it's modeled
-preflop) is deliberately NOT modeled this session - `ev_action_bb` for a postflop
-bet/raise is a static showdown number against the narrowed range, exactly like a
-preflop check/call. Preflop needed its own two-session split (the engine itself, then
-fold equity on top of it) rather than doing both at once, and postflop follows the
-same split for the same reason: it's a large enough independent piece of modeling to
-get wrong if rushed alongside the range-narrowing work.
+Postflop fold equity
+---------------------
+When hero bets or raises on the flop, turn, or river, the same fold/continue split
+used preflop now applies here too: `estimate_fold_pct(cost_bb, pot_before_bb)` (MDF's
+complement) estimates villain's fold probability, and the weakest slice of whatever
+band the decision would otherwise face is trimmed off via `_continuing_band` before
+running the showdown equity math against the narrower continuing range.
+
+This reuses `estimate_fold_pct` and `_continuing_band` completely unchanged from the
+preflop path - same formula, called with that street's own `cost_bb`/`pot_before_bb`
+(decided with the user): MDF is derived purely from a bet's size relative to the pot
+at the moment it's made, so nothing about it is inherently preflop-specific. The
+street-by-street range narrowing this module already does (`_reconstruct_postflop_street`)
+happens *before* hero's bet is evaluated - it updates what band villain is assigned as
+of this decision, reflecting that villain's own prior actions have already tightened
+their range. Fold equity then applies on top of that already-current band, exactly the
+way it applies to whatever band preflop's own action sequence has assigned by the time
+hero bets or raises. The alternative considered was a per-street dampening factor on
+top of raw MDF (villains defend more than equilibrium against a late-street bet, since
+by then their own range has already been trimmed toward hands that intend to see
+showdown) - set aside as a second, untested, un-empirical knob stacked on top of range
+narrowing that already does most of that same tightening.
+
+For check/call, hero isn't the one betting, so as before, no fold equity applies -
+these keep the plain equity-vs-range showdown math.
 """
 
 from __future__ import annotations
@@ -228,6 +246,14 @@ class PostflopDecision:
     ev_fold_bb: float
     ev_diff_bb: float | None
     flag: str  # "+EV" | "-EV" | "marginal" | "baseline" (baseline = hero folded)
+    # Fold-equity fields - only populated for bet/raise decisions (None otherwise,
+    # including for hero's own folds), same convention as PreflopDecision. fold_pct is
+    # the MDF-derived estimate of villain's fold probability; continuing_range_band is
+    # opponent_range_band narrowed down to the sub-range that continues instead of
+    # folding, and is what hero_equity_pct is actually computed against for these
+    # decisions. See the module docstring's "Postflop fold equity" section.
+    fold_pct: float | None = None
+    continuing_range_band: tuple[float, float] | None = None
 
 
 def equity_vs_range(
@@ -670,8 +696,17 @@ def analyze_hand_postflop(
             pot_before = raw["pot_before_bb"]
             pot_after = pot_before + cost
 
+            has_fold_equity = raw["action_type"] in ("bet", "raise")
+            if has_fold_equity:
+                fold_pct = estimate_fold_pct(cost, pot_before)
+                continue_pct = 1.0 - fold_pct
+                equity_band = _continuing_band(decision_band, continue_pct)
+            else:
+                fold_pct = None
+                equity_band = decision_band
+
             villain_combos = range_combos_for_band(
-                decision_band[0], decision_band[1], dead_cards=f"{hero_hole_cards} {board}"
+                equity_band[0], equity_band[1], dead_cards=f"{hero_hole_cards} {board}"
             )
             hero_equity_pct = equity_vs_range(
                 hero_hole_cards,
@@ -681,7 +716,12 @@ def analyze_hand_postflop(
                 seed=seed,
             )
 
-            ev_action = (hero_equity_pct / 100.0) * pot_after - cost
+            if has_fold_equity:
+                showdown_ev = (hero_equity_pct / 100.0) * pot_after - cost
+                ev_action = fold_pct * pot_before + continue_pct * showdown_ev
+            else:
+                ev_action = (hero_equity_pct / 100.0) * pot_after - cost
+
             ev_fold = 0.0
             diff = ev_action - ev_fold
 
@@ -710,6 +750,8 @@ def analyze_hand_postflop(
                     ev_fold_bb=ev_fold,
                     ev_diff_bb=diff,
                     flag=flag,
+                    fold_pct=fold_pct,
+                    continuing_range_band=equity_band if has_fold_equity else None,
                 )
             )
 

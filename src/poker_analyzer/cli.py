@@ -90,9 +90,17 @@ def _format_decision(decision: PreflopDecision | PostflopDecision, street: str |
     if decision.flag == "baseline":
         return f"{action:<16} flag: baseline (fold, no EV computed)"
 
+    # fold_pct is only set for a bet/raise (the only actions with fold equity) -
+    # surfaced here so a result like "0.0% equity, +0.00bb EV" on a bet is legible
+    # as "villain folds fold_pct% of the time, and a bet with 0% continuing equity
+    # is exactly breakeven against a defender playing MDF" rather than looking like
+    # nothing was computed. See ev/engine.py's "Fold equity" / "Postflop fold
+    # equity" docstring sections for why a 0%-equity bet nets exactly 0bb EV.
+    fold_pct_str = f"  fold_pct: {decision.fold_pct * 100:4.1f}%" if decision.fold_pct is not None else ""
+
     return (
         f"{action:<16} flag: {decision.flag:<8} "
-        f"equity: {decision.hero_equity_pct:5.1f}%  "
+        f"equity: {decision.hero_equity_pct:5.1f}%{fold_pct_str}  "
         f"EV(action): {decision.ev_action_bb:+.2f}bb  "
         f"EV(fold): {decision.ev_fold_bb:+.2f}bb  "
         f"diff: {decision.ev_diff_bb:+.2f}bb"

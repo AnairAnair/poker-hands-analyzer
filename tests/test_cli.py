@@ -259,6 +259,42 @@ def test_ev_report_prints_position_action_flag_and_ev_numbers(monkeypatch):
     assert "+7.76bb" in result.stdout
 
 
+def test_ev_report_shows_fold_pct_for_bet_and_raise_but_not_for_call(monkeypatch):
+    """
+    fold_pct is only meaningful for a bet/raise (the only actions with fold equity -
+    see ev/engine.py). It's None on every other decision. The printed line should
+    show it when present and omit it entirely otherwise, rather than printing a
+    misleading "fold_pct: 0.0%" for a decision hero didn't induce any folds on.
+    """
+    raise_decision = _make_decision(
+        action_type="raise",
+        hero_equity_pct=0.0,
+        ev_action_bb=0.0,
+        ev_diff_bb=0.0,
+        flag="marginal",
+        fold_pct=0.46875,
+        continuing_range_band=(12.0, 14.295),
+    )
+    call_decision = _make_decision(hand_id=2, action_type="call", fold_pct=None, continuing_range_band=None)
+    monkeypatch.setattr(
+        cli,
+        "analyze_all_preflop_decisions",
+        lambda db_path, trials_per_combo, seed: [raise_decision, call_decision],
+    )
+    monkeypatch.setattr(
+        cli, "analyze_all_postflop_decisions", lambda db_path, trials_per_combo, seed: []
+    )
+
+    result = runner.invoke(cli.app, ["ev-report"])
+
+    assert result.exit_code == 0
+    lines = result.stdout.splitlines()
+    raise_line = next(line for line in lines if "raise 3.00bb" in line)
+    call_line = next(line for line in lines if "call" in line)
+    assert "fold_pct: 46.9%" in raise_line
+    assert "fold_pct" not in call_line
+
+
 def test_ev_report_flags_fold_as_baseline_without_ev_numbers(monkeypatch):
     fold_decision = _make_decision(
         action_type="fold",
