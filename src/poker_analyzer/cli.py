@@ -25,6 +25,7 @@ from poker_analyzer.ev.engine import (
     analyze_all_preflop_decisions,
 )
 from poker_analyzer.ingestion.loader import IngestionError, load_hand_log_csv
+from poker_analyzer.leaks.detector import MIN_SAMPLE_SIZE, PatternLeak, detect_leaks
 from poker_analyzer.stats.aggregator import print_summary
 from poker_analyzer.validation.validator import validate_hand_log_csv
 
@@ -152,6 +153,79 @@ def ev_report(
     if current_hand_id is not None:
         for postflop_decision in postflop_by_hand.get(current_hand_id, []):
             typer.echo(f"  {_format_decision(postflop_decision, street=postflop_decision.street)}")
+
+
+def _format_pattern_leak(pattern: PatternLeak) -> str:
+    occurrence_word = "occurrence" if pattern.occurrences == 1 else "occurrences"
+    occurrence_str = f"{pattern.occurrences} {occurrence_word}"
+    line = f"{pattern.label:<22} {occurrence_str:<13} avg diff: {pattern.avg_ev_diff_bb:+.2f}bb"
+    if pattern.verdict != "insufficient_data":
+        line += (
+            f"   (-EV: {pattern.negative_ev_count}  marginal: {pattern.marginal_count}  "
+            f"+EV: {pattern.positive_ev_count})"
+        )
+    hands = ", ".join(str(hand_id) for hand_id in pattern.hand_ids)
+    return f"{line}   hands: {hands}"
+
+
+_LEAK_SECTIONS = [
+    ("leak", "Leaks (-EV across >= {n} occurrences)"),
+    ("marginal", "Marginal patterns (>= {n} occurrences)"),
+    ("fine", "Fine patterns (+EV, >= {n} occurrences)"),
+    ("insufficient_data", "Insufficient data (< {n} occurrences - not a leak call yet)"),
+]
+
+
+@app.command()
+def leaks(
+    db: str = typer.Option(DEFAULT_DB_PATH, "--db", help="Path to the SQLite database"),
+    trials: int = typer.Option(
+        DEFAULT_TRIALS_PER_COMBO, "--trials", help="Equity simulation trials per opponent range combo"
+    ),
+    seed: Optional[int] = typer.Option(
+        None, "--seed", help="Random seed for reproducible equity simulation"
+    ),
+    min_sample: int = typer.Option(
+        MIN_SAMPLE_SIZE,
+        "--min-sample",
+        help="Minimum occurrences of a (position, action) pattern before it's reported as a real leak instead of insufficient data",
+    ),
+) -> None:
+    """Group hero's EV-flagged decisions by (position, action) pattern and surface which patterns skew -EV or marginal across multiple hands."""
+    try:
+        preflop_decisions = analyze_all_preflop_decisions(db, trials_per_combo=trials, seed=seed)
+        postflop_decisions = analyze_all_postflop_decisions(db, trials_per_combo=trials, seed=seed)
+    except EVEngineError as exc:
+        typer.echo(f"Leak detection failed:\n{exc}")
+        raise typer.Exit(code=1)
+
+    if not preflop_decisions:
+        typer.echo("No decisions found - is the database empty?")
+        return
+
+    patterns = detect_leaks(preflop_decisions, postflop_decisions, min_sample_size=min_sample)
+    total_hands = len({decision.hand_id for decision in preflop_decisions})
+
+    typer.echo("Poker Hand Analyzer - Leak Report")
+    typer.echo("=" * 44)
+    typer.echo(
+        f"\nNOTE: a pattern (same position + action type, preflop or by street) needs at "
+        f"least {min_sample} occurrence(s) before its EV skew is reported as a real leak "
+        f"rather than \"insufficient data\" - with only {total_hands} hand(s) logged, most "
+        "patterns won't clear that bar yet. Folds are excluded (no EV signal - see "
+        "leaks/detector.py).\n"
+    )
+
+    for verdict, title_template in _LEAK_SECTIONS:
+        title = title_template.format(n=min_sample)
+        typer.echo(f"\n{title}:")
+        typer.echo("-" * len(title))
+        group = [pattern for pattern in patterns if pattern.verdict == verdict]
+        if not group:
+            typer.echo("  (none)")
+            continue
+        for pattern in group:
+            typer.echo(f"  {_format_pattern_leak(pattern)}")
 
 
 def main() -> None:

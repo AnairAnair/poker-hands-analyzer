@@ -20,6 +20,7 @@ from poker_analyzer import cli
 from poker_analyzer.db.init_db import init_db
 from poker_analyzer.ev.engine import PostflopDecision, PreflopDecision
 from poker_analyzer.ingestion.loader import IngestionError
+from poker_analyzer.leaks.detector import PatternLeak
 
 runner = CliRunner()
 
@@ -34,7 +35,7 @@ def test_help_lists_all_subcommands():
     result = runner.invoke(cli.app, ["--help"])
 
     assert result.exit_code == 0
-    for name in ("validate", "ingest", "stats", "ev-report"):
+    for name in ("validate", "ingest", "stats", "ev-report", "leaks"):
         assert name in result.stdout
 
 
@@ -381,6 +382,178 @@ def test_ev_report_groups_postflop_lines_under_correct_hand(monkeypatch):
     assert hand1_header < hand2_header < flop_line
 
 
+# --- leaks ---------------------------------------------------------------------------
+
+
+def _make_pattern_leak(**overrides) -> PatternLeak:
+    fields = dict(
+        position="UTG",
+        street="preflop",
+        action_type="raise",
+        label="UTG raises",
+        occurrences=6,
+        avg_ev_diff_bb=2.31,
+        total_ev_diff_bb=13.86,
+        negative_ev_count=0,
+        marginal_count=1,
+        positive_ev_count=5,
+        hand_ids=(1, 2, 4, 6, 9, 12),
+        verdict="fine",
+    )
+    fields.update(overrides)
+    return PatternLeak(**fields)
+
+
+def test_leaks_calls_engine_with_parsed_args(monkeypatch):
+    seen = {}
+
+    def fake_analyze_preflop(db_path, trials_per_combo, seed):
+        seen["preflop"] = {"db_path": db_path, "trials_per_combo": trials_per_combo, "seed": seed}
+        return [_make_decision()]
+
+    def fake_analyze_postflop(db_path, trials_per_combo, seed):
+        seen["postflop"] = {"db_path": db_path, "trials_per_combo": trials_per_combo, "seed": seed}
+        return []
+
+    monkeypatch.setattr(cli, "analyze_all_preflop_decisions", fake_analyze_preflop)
+    monkeypatch.setattr(cli, "analyze_all_postflop_decisions", fake_analyze_postflop)
+
+    result = runner.invoke(
+        cli.app,
+        ["leaks", "--db", "my.db", "--trials", "50", "--seed", "7"],
+    )
+
+    assert result.exit_code == 0
+    expected = {"db_path": "my.db", "trials_per_combo": 50, "seed": 7}
+    assert seen == {"preflop": expected, "postflop": expected}
+
+
+def test_leaks_passes_min_sample_through_to_detector(monkeypatch):
+    seen = {}
+
+    monkeypatch.setattr(
+        cli, "analyze_all_preflop_decisions", lambda db_path, trials_per_combo, seed: [_make_decision()]
+    )
+    monkeypatch.setattr(cli, "analyze_all_postflop_decisions", lambda db_path, trials_per_combo, seed: [])
+
+    def fake_detect_leaks(preflop_decisions, postflop_decisions, min_sample_size):
+        seen["min_sample_size"] = min_sample_size
+        return []
+
+    monkeypatch.setattr(cli, "detect_leaks", fake_detect_leaks)
+
+    result = runner.invoke(cli.app, ["leaks", "--min-sample", "5"])
+
+    assert result.exit_code == 0
+    assert seen["min_sample_size"] == 5
+
+
+def test_leaks_defaults_min_sample_to_module_constant(monkeypatch):
+    from poker_analyzer.leaks.detector import MIN_SAMPLE_SIZE
+
+    seen = {}
+    monkeypatch.setattr(
+        cli, "analyze_all_preflop_decisions", lambda db_path, trials_per_combo, seed: [_make_decision()]
+    )
+    monkeypatch.setattr(cli, "analyze_all_postflop_decisions", lambda db_path, trials_per_combo, seed: [])
+
+    def fake_detect_leaks(preflop_decisions, postflop_decisions, min_sample_size):
+        seen["min_sample_size"] = min_sample_size
+        return []
+
+    monkeypatch.setattr(cli, "detect_leaks", fake_detect_leaks)
+
+    result = runner.invoke(cli.app, ["leaks"])
+
+    assert result.exit_code == 0
+    assert seen["min_sample_size"] == MIN_SAMPLE_SIZE
+
+
+def test_leaks_handles_empty_database(monkeypatch):
+    monkeypatch.setattr(cli, "analyze_all_preflop_decisions", lambda db_path, trials_per_combo, seed: [])
+    monkeypatch.setattr(cli, "analyze_all_postflop_decisions", lambda db_path, trials_per_combo, seed: [])
+
+    result = runner.invoke(cli.app, ["leaks"])
+
+    assert result.exit_code == 0
+    assert "No decisions found" in result.stdout
+
+
+def test_leaks_prints_pattern_under_its_verdict_section(monkeypatch):
+    monkeypatch.setattr(
+        cli, "analyze_all_preflop_decisions", lambda db_path, trials_per_combo, seed: [_make_decision()]
+    )
+    monkeypatch.setattr(cli, "analyze_all_postflop_decisions", lambda db_path, trials_per_combo, seed: [])
+    monkeypatch.setattr(
+        cli,
+        "detect_leaks",
+        lambda preflop_decisions, postflop_decisions, min_sample_size: [
+            _make_pattern_leak(
+                label="UTG turn bets",
+                verdict="leak",
+                avg_ev_diff_bb=-2.5,
+                occurrences=3,
+                hand_ids=(3, 7, 11),
+            )
+        ],
+    )
+
+    result = runner.invoke(cli.app, ["leaks"])
+
+    assert result.exit_code == 0
+    leak_header = result.stdout.index("Leaks (")
+    pattern_line = result.stdout.index("UTG turn bets")
+    marginal_header = result.stdout.index("Marginal patterns")
+    assert leak_header < pattern_line < marginal_header
+    assert "-2.50bb" in result.stdout
+    assert "hands: 3, 7, 11" in result.stdout
+
+
+def test_leaks_shows_insufficient_data_without_flag_breakdown(monkeypatch):
+    monkeypatch.setattr(
+        cli, "analyze_all_preflop_decisions", lambda db_path, trials_per_combo, seed: [_make_decision()]
+    )
+    monkeypatch.setattr(cli, "analyze_all_postflop_decisions", lambda db_path, trials_per_combo, seed: [])
+    monkeypatch.setattr(
+        cli,
+        "detect_leaks",
+        lambda preflop_decisions, postflop_decisions, min_sample_size: [
+            _make_pattern_leak(
+                label="BB calls",
+                verdict="insufficient_data",
+                occurrences=1,
+                avg_ev_diff_bb=-7.83,
+                negative_ev_count=0,
+                marginal_count=0,
+                positive_ev_count=0,
+                hand_ids=(11,),
+            )
+        ],
+    )
+
+    result = runner.invoke(cli.app, ["leaks"])
+
+    assert result.exit_code == 0
+    lines = result.stdout.splitlines()
+    pattern_line = next(line for line in lines if "BB calls" in line)
+    assert "-EV:" not in pattern_line
+    assert "hands: 11" in pattern_line
+    assert "Insufficient data" in result.stdout
+
+
+def test_leaks_shows_none_for_empty_verdict_sections(monkeypatch):
+    monkeypatch.setattr(
+        cli, "analyze_all_preflop_decisions", lambda db_path, trials_per_combo, seed: [_make_decision()]
+    )
+    monkeypatch.setattr(cli, "analyze_all_postflop_decisions", lambda db_path, trials_per_combo, seed: [])
+    monkeypatch.setattr(cli, "detect_leaks", lambda preflop_decisions, postflop_decisions, min_sample_size: [])
+
+    result = runner.invoke(cli.app, ["leaks"])
+
+    assert result.exit_code == 0
+    assert result.stdout.count("(none)") == 4
+
+
 # --- end-to-end, real pipeline (no mocks) ---------------------------------------------
 
 
@@ -417,3 +590,30 @@ def test_ev_report_end_to_end(tmp_path):
     assert "Hand 1" in result.stdout
     assert "hero:" in result.stdout
     assert "flag:" in result.stdout
+
+
+def test_leaks_end_to_end(tmp_path):
+    db_path = tmp_path / "poker.db"
+    init_db(db_path)
+    runner.invoke(cli.app, ["ingest", str(REAL_HANDS_CSV), "--db", str(db_path)])
+
+    result = runner.invoke(cli.app, ["leaks", "--db", str(db_path), "--trials", "20", "--seed", "1"])
+
+    assert result.exit_code == 0
+    assert "Poker Hand Analyzer - Leak Report" in result.stdout
+    assert "UTG raises" in result.stdout  # the one pattern with 6 real occurrences
+    assert "Insufficient data" in result.stdout
+
+
+def test_leaks_end_to_end_respects_custom_min_sample(tmp_path):
+    db_path = tmp_path / "poker.db"
+    init_db(db_path)
+    runner.invoke(cli.app, ["ingest", str(REAL_HANDS_CSV), "--db", str(db_path)])
+
+    strict_result = runner.invoke(
+        cli.app, ["leaks", "--db", str(db_path), "--trials", "20", "--seed", "1", "--min-sample", "10"]
+    )
+
+    assert strict_result.exit_code == 0
+    # No real pattern in the 15-hand database repeats 10+ times.
+    assert "  (none)" in strict_result.stdout.split("Insufficient data")[0]

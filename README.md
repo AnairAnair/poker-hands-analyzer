@@ -6,8 +6,8 @@ sessions.
 
 > Status: early scaffolding. Preflop and postflop EV engines - both with fold equity
 > (MDF-derived, the same formula on every street) - decision flagging, session
-> aggregation stats, a unified CLI, and a Streamlit dashboard are built - see
-> "Current status" below.
+> aggregation stats, cross-hand leak detection, a unified CLI, and a Streamlit
+> dashboard are built - see "Current status" below.
 
 ## Why this project
 
@@ -53,6 +53,8 @@ poker-hand-analyzer/
 │       │   └── engine.py             # preflop + postflop decision-level EV, +EV/-EV/marginal flagging
 │       ├── stats/
 │       │   └── aggregator.py         # per-session + combined win rate, variance, swings
+│       ├── leaks/
+│       │   └── detector.py           # groups EV-flagged decisions by pattern, flags -EV/marginal skews
 │       └── dashboard/
 │           ├── data_prep.py          # shapes aggregator/ev-engine output into DataFrames
 │           └── app.py                # Streamlit app - renders data_prep's output, no logic
@@ -65,6 +67,7 @@ poker-hand-analyzer/
     ├── test_ingestion.py
     ├── test_ev_engine.py
     ├── test_stats_aggregator.py
+    ├── test_leak_detector.py
     └── test_dashboard_data_prep.py
 ```
 
@@ -107,6 +110,7 @@ python scripts/poker_cli.py validate data/templates/hand_log_template.csv
 python scripts/poker_cli.py ingest data/templates/real_hands.csv --db poker_hands.db
 python scripts/poker_cli.py stats --db poker_hands.db
 python scripts/poker_cli.py ev-report --db poker_hands.db
+python scripts/poker_cli.py leaks --db poker_hands.db
 ```
 
 | Subcommand  | Wraps                                  | Key options |
@@ -115,6 +119,7 @@ python scripts/poker_cli.py ev-report --db poker_hands.db
 | `ingest`    | `ingestion/loader.py`                   | `csv_path`, `--db`, `--buy-in-cents` |
 | `stats`     | `stats/aggregator.py`                   | `--db` |
 | `ev-report` | `ev/engine.py`                          | `--db`, `--trials`, `--seed` |
+| `leaks`     | `leaks/detector.py` (via `ev/engine.py`)| `--db`, `--trials`, `--seed`, `--min-sample` |
 
 Run `python scripts/poker_cli.py <subcommand> --help` for full option details.
 Tested end-to-end (and with each subcommand's dispatch to its underlying module
@@ -338,6 +343,80 @@ band and by how much independent of equity simulation, and direct unit tests
 confirming postflop bet/raise decisions reuse `estimate_fold_pct`/`_continuing_band`
 identically to preflop (same formula, computed from that street's own pot/cost).
 
+## Leak detection
+
+`src/poker_analyzer/leaks/detector.py` groups hero's already-flagged preflop and
+postflop decisions - the same `PreflopDecision`/`PostflopDecision` objects
+`ev/engine.py` already produces - by **pattern**: same position, same action type,
+and same street (or "preflop"), e.g. "BB calls" or "UTG river bets". A single
+hand's `-EV` flag might just be a spot that ran badly; a pattern that skews
+`-EV`/marginal across *several* hands is a more credible candidate for an actual
+leak in hero's game. This module recomputes nothing - it only aggregates each
+pattern's existing `ev_diff_bb`/`flag` fields, reusing `ev/engine.py`'s own
+`MARGINAL_THRESHOLD_BB` to classify a pattern's *average* diff the same way a
+single decision's diff is already classified.
+
+**Minimum sample size.** With only 15 hands in the database, most patterns occur
+once or twice - not enough repetition to mean anything yet, the same caveat
+`stats/aggregator.py` already applies to overall hand count, applied here per
+pattern instead. A pattern needs at least `MIN_SAMPLE_SIZE` = **3** occurrences
+before it's reported as a real `leak` / `marginal` / `fine` verdict; below that,
+it's labeled `insufficient_data` - never dropped from the report, just not called
+a leak. 3 was chosen (checked against the real database, confirmed with the user)
+because it's the smallest threshold that already surfaces real signal without
+overreaching: at 3, two patterns clear the bar (`UTG raises` x6, `UTG turn bets`
+x3) while the rest stay honestly unclassified; at 2, eleven patterns would
+qualify - barely more reliable than a single hand; at 4+, almost nothing would
+qualify yet, defeating the point of running this now. Override it with
+`--min-sample` if you want a stricter or looser bar.
+
+Hero folds are excluded from grouping entirely: a fold's `ev_diff_bb` is always
+exactly `0.0` by construction (EV(fold) compared against itself), so it carries
+no EV signal to aggregate.
+
+```bash
+python scripts/poker_cli.py leaks --db poker_hands.db
+
+# Poker Hand Analyzer - Leak Report
+# ============================================
+#
+# NOTE: a pattern (same position + action type, preflop or by street) needs at
+# least 3 occurrence(s) before its EV skew is reported as a real leak rather
+# than "insufficient data" - with only 15 hand(s) logged, most patterns won't
+# clear that bar yet. Folds are excluded (no EV signal - see leaks/detector.py).
+#
+# Leaks (-EV across >= 3 occurrences):
+# -----------------------------------
+#   (none)
+#
+# Marginal patterns (>= 3 occurrences):
+# ------------------------------------
+#   UTG raises             6 occurrences avg diff: +0.63bb   (-EV: 0  marginal: 6  +EV: 0)   hands: 2, 4, 7, 8, 9, 10
+#
+# Fine patterns (+EV, >= 3 occurrences):
+# -------------------------------------
+#   UTG turn bets           3 occurrences avg diff: +10.61bb  (-EV: 0  marginal: 0  +EV: 3)   hands: 2, 4, 8
+#
+# Insufficient data (< 3 occurrences - not a leak call yet):
+# -----------------------------------------------------------
+#   BB calls                1 occurrence  avg diff: -7.83bb   hands: 11
+#   ... (every other pattern - all still below the sample-size bar)
+```
+
+`--trials` and `--seed` control the same Monte Carlo equity simulation as
+`ev-report` (leak detection runs the EV engine itself to get decisions, then
+aggregates - it doesn't take pre-computed decisions from a file). `--min-sample`
+overrides `MIN_SAMPLE_SIZE` for one run.
+
+Validated in `tests/test_leak_detector.py`: unit tests against hand-constructed
+decisions pinning down the grouping key, the min-sample threshold (including a
+check that under-sampled patterns are correctly excluded from any leak/marginal/
+fine verdict), the leak/marginal/fine cutoffs, fold exclusion, and hand_id
+dedup/ordering - plus integration tests running the real EV engine against the
+actual 15 hands in `data/templates/real_hands.csv`, confirming `UTG raises` (6
+real occurrences) gets a real verdict while every thinner real pattern is
+labeled `insufficient_data`, never called a leak.
+
 ## Session aggregation stats
 
 `src/poker_analyzer/stats/aggregator.py` computes, per-session and combined across
@@ -431,10 +510,18 @@ Built so far:
       existing postflop textbook spot, and direct unit tests of the fold-equity math.
 - [x] Session aggregation (win rate in bb/100, variance, std dev, up/downswing
       tracking) - per-session and combined, validated against the 15 real hands
+- [x] Leak detection (`leaks/detector.py`): groups EV-flagged decisions by
+      (position, street, action type) pattern and flags patterns that skew -EV/
+      marginal across multiple hands, not just a single hand's flag - reuses
+      `ev/engine.py`'s output and `MARGINAL_THRESHOLD_BB` rather than
+      recomputing anything, requires >= `MIN_SAMPLE_SIZE` (3) occurrences before
+      calling a pattern a real leak (below that, labeled `insufficient_data`
+      rather than dropped) - validated against the real 15 hands and
+      hand-constructed pattern/threshold/ordering unit tests
 - [x] Unified CLI (`scripts/poker_cli.py`, Typer) with `validate` / `ingest` /
-      `stats` / `ev-report` subcommands, wrapping the modules above rather than
-      duplicating their logic - with pytest coverage of argument parsing, dispatch,
-      and end-to-end runs
+      `stats` / `ev-report` / `leaks` subcommands, wrapping the modules above
+      rather than duplicating their logic - with pytest coverage of argument
+      parsing, dispatch, and end-to-end runs
 - [x] `ev-report`: prints both the preflop and postflop EV engines' output per hand
       (position, action/street, +EV/-EV/marginal flag, equity/EV numbers)
 - [x] Streamlit dashboard (`dashboard/app.py`) - result-over-time and win-rate
@@ -453,9 +540,10 @@ Not built yet (later sessions, per the project spec's build phases):
       opponent behavior instead of a fixed equilibrium/MDF benchmark, preflop or post
 - [ ] Wiring postflop decisions into the dashboard (still only displays preflop
       decisions - `ev-report` already prints both)
-- [ ] Leak-detection / pattern analysis across logged decisions - intentionally
-      starting only after postflop EV (including fold equity) is complete, so it
-      analyzes complete numbers
+- [ ] Wiring leak detection into the dashboard (CLI-only for now, see `leaks`
+      above)
+- [ ] `ev-report`'s known runtime slowdown (separate future session, not
+      leak-detection scope)
 - [ ] Portfolio writeup
 
 ## License
