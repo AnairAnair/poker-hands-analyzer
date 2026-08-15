@@ -574,7 +574,8 @@ def test_ingest_and_stats_end_to_end(tmp_path):
 
     stats_result = runner.invoke(cli.app, ["stats", "--db", str(db_path)])
     assert stats_result.exit_code == 0
-    assert "Combined (all sessions):" in stats_result.stdout
+    assert "Per stakes level:" in stats_result.stdout
+    assert "Combined (all sessions, MIXED STAKES" in stats_result.stdout
 
 
 def test_ev_report_end_to_end(tmp_path):

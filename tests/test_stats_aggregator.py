@@ -1,11 +1,17 @@
 """
-Tests for session/combined aggregation (poker_analyzer.stats.aggregator).
+Tests for session/per-stakes/combined aggregation (poker_analyzer.stats.aggregator).
 
-Two kinds of coverage, per the task:
-- Sanity checks against the actual 15 hands loaded from data/templates/real_hands.csv
-  (total hand count, sums reconciling between per-session and combined, and the
-  variance/std-dev/swing math cross-checked against independent reference
-  computations rather than hardcoded numbers).
+Three kinds of coverage, per the task:
+- Sanity checks against the actual 64 hands loaded from data/templates/real_hands.csv
+  (15 hands, 2 Andover 0.10/0.20 sessions) plus data/templates/online_hands.csv (49
+  hands, 5 ClubWPT Gold 0.01/0.02 sessions) - total hand count, sums reconciling
+  between per-session/per-stakes/combined, and the variance/std-dev/swing math
+  cross-checked against independent reference computations rather than hardcoded
+  numbers.
+- Per-stakes-level coverage (aggregate_stakes_stats) specifically: grouping by the
+  stakes field rather than per-session or all-sessions-blended, using the database's
+  two real stake levels (10x apart in real dollar value) to confirm the grouping is
+  real and not accidentally equivalent to session or combined aggregation.
 - A small hand-constructed "textbook" sequence for the swing metric, where the
   peak/trough math can be verified by hand.
 """
@@ -24,15 +30,23 @@ from poker_analyzer.stats.aggregator import (
     aggregate_all,
     aggregate_combined_stats,
     aggregate_session_stats,
+    aggregate_stakes_stats,
 )
 
 REAL_HANDS_CSV = Path("data/templates/real_hands.csv")
+ONLINE_HANDS_CSV = Path("data/templates/online_hands.csv")
 
 
 def _load_real_hands_db(tmp_path: Path) -> sqlite3.Connection:
+    """
+    Loads the full real database: 15 Andover 0.10/0.20 hands (real_hands.csv) plus
+    49 ClubWPT Gold 0.01/0.02 hands (online_hands.csv) - 64 hands, 7 sessions, 2
+    stake levels, matching what's actually loaded into poker_hands.db.
+    """
     db_path = tmp_path / "poker.db"
     init_db(db_path)
     load_hand_log_csv(REAL_HANDS_CSV, db_path)
+    load_hand_log_csv(ONLINE_HANDS_CSV, db_path)
     return sqlite3.connect(db_path)
 
 
@@ -60,12 +74,12 @@ def _brute_force_swings(results: list[float]) -> tuple[float, float]:
 # --- Real hands from the database ---------------------------------------------------
 
 
-def test_total_hands_across_database_is_15(tmp_path):
+def test_total_hands_across_database_is_64(tmp_path):
     conn = _load_real_hands_db(tmp_path)
     combined = aggregate_combined_stats(conn)
     conn.close()
 
-    assert combined.total_hands == 15
+    assert combined.total_hands == 64
 
 
 def test_per_session_hand_counts_sum_to_combined(tmp_path):
@@ -74,7 +88,7 @@ def test_per_session_hand_counts_sum_to_combined(tmp_path):
     combined = aggregate_combined_stats(conn)
     conn.close()
 
-    assert len(sessions) == 2
+    assert len(sessions) == 7
     assert sum(s.total_hands for s in sessions) == combined.total_hands
 
 
@@ -143,10 +157,159 @@ def test_aggregate_all_returns_sessions_and_combined(tmp_path):
 
     result = aggregate_all(str(db_path))
 
-    assert len(result["sessions"]) == 2
+    assert len(result["sessions"]) == 7
     assert isinstance(result["combined"], AggregateStats)
     assert result["combined"].session_id is None
-    assert {s.session_id for s in result["sessions"]} == {1, 2}
+    assert {s.session_id for s in result["sessions"]} == {1, 2, 3, 4, 5, 6, 7}
+
+
+def test_combined_label_and_stakes_flag_it_as_mixed_stakes(tmp_path):
+    """
+    The combined row still blends every stakes level together (kept for aggregate_all/
+    the dashboard - see the module docstring), so it must be labeled clearly rather
+    than reading as a real win-rate number, and its `stakes` field is None (it isn't
+    one stakes level).
+    """
+    conn = _load_real_hands_db(tmp_path)
+    combined = aggregate_combined_stats(conn)
+    conn.close()
+
+    assert "mixed stakes" in combined.label.lower()
+    assert combined.stakes is None
+
+
+# --- Per-stakes-level aggregation -------------------------------------------------------
+
+
+def test_aggregate_stakes_stats_groups_by_stakes_field_not_session_or_combined(tmp_path):
+    """
+    The real database has 2 stake levels across 7 sessions: 0.10/0.20 (2 Andover
+    sessions, 15 hands) and 0.01/0.02 (5 ClubWPT Gold sessions, 49 hands). Per-stakes
+    aggregation must produce exactly these 2 groups - not 7 (per-session) and not 1
+    (all sessions blended, what aggregate_combined_stats already does).
+    """
+    conn = _load_real_hands_db(tmp_path)
+    by_stakes = aggregate_stakes_stats(conn)
+    conn.close()
+
+    assert len(by_stakes) == 2
+    hands_by_stakes = {stats.stakes: stats.total_hands for stats in by_stakes}
+    assert hands_by_stakes == {"0.10/0.20": 15, "0.01/0.02": 49}
+
+
+def test_aggregate_stakes_stats_ordered_by_big_blind_ascending(tmp_path):
+    """0.01/0.02 (2-cent big blind) should sort before 0.10/0.20 (20-cent big blind)."""
+    conn = _load_real_hands_db(tmp_path)
+    by_stakes = aggregate_stakes_stats(conn)
+    conn.close()
+
+    assert [stats.stakes for stats in by_stakes] == ["0.01/0.02", "0.10/0.20"]
+
+
+def test_aggregate_stakes_stats_hand_counts_sum_to_combined(tmp_path):
+    conn = _load_real_hands_db(tmp_path)
+    by_stakes = aggregate_stakes_stats(conn)
+    combined = aggregate_combined_stats(conn)
+    conn.close()
+
+    assert sum(stats.total_hands for stats in by_stakes) == combined.total_hands
+
+
+def test_aggregate_stakes_stats_session_ids_are_none(tmp_path):
+    """A per-stakes row spans multiple sessions, so session_id (a single-session concept) is None."""
+    conn = _load_real_hands_db(tmp_path)
+    by_stakes = aggregate_stakes_stats(conn)
+    conn.close()
+
+    assert all(stats.session_id is None for stats in by_stakes)
+
+
+def test_aggregate_stakes_stats_matches_per_session_sum_for_each_stakes_level(tmp_path):
+    """
+    A stakes group's total_hands/total_result_bb must equal the sum across exactly the
+    sessions at that stakes level - reconciling the per-stakes grouping against the
+    already-tested per-session aggregation, independent of the stakes SQL query itself.
+    """
+    conn = _load_real_hands_db(tmp_path)
+    sessions = aggregate_session_stats(conn)
+    by_stakes = aggregate_stakes_stats(conn)
+    conn.close()
+
+    for stakes_stats in by_stakes:
+        matching_sessions = [s for s in sessions if s.stakes == stakes_stats.stakes]
+        assert stakes_stats.total_hands == sum(s.total_hands for s in matching_sessions)
+        assert stakes_stats.total_result_bb == pytest.approx(
+            sum(s.total_result_bb for s in matching_sessions)
+        )
+
+
+def test_aggregate_stakes_stats_variance_matches_independent_statistics_module_call(tmp_path):
+    """Cross-check one stakes group's variance against a raw SQL query + statistics.variance."""
+    conn = _load_real_hands_db(tmp_path)
+    raw_results = [
+        row[0]
+        for row in conn.execute(
+            """
+            SELECT h.result_bb FROM hands h
+            JOIN sessions s ON s.session_id = h.session_id
+            WHERE s.stakes = '0.01/0.02' AND h.result_bb IS NOT NULL
+            ORDER BY h.hand_id
+            """
+        )
+    ]
+    by_stakes = aggregate_stakes_stats(conn)
+    conn.close()
+
+    clubwpt_stats = next(stats for stats in by_stakes if stats.stakes == "0.01/0.02")
+    expected_variance = statistics.variance(raw_results)
+    assert clubwpt_stats.total_hands == len(raw_results)
+    assert clubwpt_stats.variance_bb == pytest.approx(expected_variance)
+    assert clubwpt_stats.std_dev_bb == pytest.approx(expected_variance**0.5)
+
+
+def test_aggregate_stakes_stats_swings_match_brute_force_reference(tmp_path):
+    """Cross-check a stakes group's swing calc against the O(n^2) brute-force reference."""
+    conn = _load_real_hands_db(tmp_path)
+    raw_results = [
+        row[0]
+        for row in conn.execute(
+            """
+            SELECT h.result_bb FROM hands h
+            JOIN sessions s ON s.session_id = h.session_id
+            WHERE s.stakes = '0.10/0.20' AND h.result_bb IS NOT NULL
+            ORDER BY h.hand_id
+            """
+        )
+    ]
+    by_stakes = aggregate_stakes_stats(conn)
+    conn.close()
+
+    andover_stats = next(stats for stats in by_stakes if stats.stakes == "0.10/0.20")
+    expected_upswing, expected_downswing = _brute_force_swings(raw_results)
+    assert andover_stats.biggest_upswing_bb == pytest.approx(expected_upswing)
+    assert andover_stats.biggest_downswing_bb == pytest.approx(expected_downswing)
+
+
+def test_aggregate_all_includes_by_stakes(tmp_path):
+    conn = _load_real_hands_db(tmp_path)
+    conn.close()
+    db_path = tmp_path / "poker.db"
+
+    result = aggregate_all(str(db_path))
+
+    assert "by_stakes" in result
+    assert len(result["by_stakes"]) == 2
+    assert isinstance(result["by_stakes"][0], AggregateStats)
+
+
+def test_session_stats_carry_their_own_stakes_field(tmp_path):
+    conn = _load_real_hands_db(tmp_path)
+    sessions = aggregate_session_stats(conn)
+    stakes_by_session_id = dict(conn.execute("SELECT session_id, stakes FROM sessions"))
+    conn.close()
+
+    for stats in sessions:
+        assert stats.stakes == stakes_by_session_id[stats.session_id]
 
 
 # --- Hand-constructed swing scenario --------------------------------------------------

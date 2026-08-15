@@ -145,7 +145,7 @@ def test_session_summary_table_has_one_row_per_session_plus_combined(tmp_path):
     df = session_summary_table(db_path)
 
     assert len(df) == 3  # 2 real sessions + 1 combined row
-    assert df.iloc[-1]["label"] == "All sessions"
+    assert df.iloc[-1]["label"] == "All sessions (mixed stakes)"
     assert pd.isna(df.iloc[-1]["session_id"])
 
 

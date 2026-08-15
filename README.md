@@ -11,9 +11,11 @@ sessions.
 
 ## Why this project
 
-TODO (Week 4 portfolio writeup): expand on the finance-skills framing from the spec
-(EV under uncertainty, variance/drawdown tracking, building a repeatable analytical
-framework from messy input) once the tool is far enough along to demo.
+## Why this project
+
+See [WRITEUP.md](./WRITEUP.md) for the full writeup: the finance-skills framing,
+what the tool actually found once real data was behind it, and the process of
+directing an AI coding tool through this build.
 
 ## Tech stack
 
@@ -37,7 +39,8 @@ poker-hand-analyzer/
 │   └── templates/
 │       ├── hand_log_template.csv     # exact column format for logging hands
 │       ├── hand_log_template_GUIDE.md  # documents every column/encoding
-│       └── real_hands.csv            # real logged hands, loaded into the DB
+│       ├── real_hands.csv            # 15 real Andover 0.10/0.20 hands, loaded into the DB
+│       └── online_hands.csv          # 49 real ClubWPT Gold 0.01/0.02 hands, loaded into the DB
 ├── src/
 │   └── poker_analyzer/
 │       ├── cli.py                    # unified Typer CLI: validate / ingest / stats / ev-report
@@ -499,22 +502,66 @@ labeled `insufficient_data`, never called a leak.
 
 ## Session aggregation stats
 
-`src/poker_analyzer/stats/aggregator.py` computes, per-session and combined across
-every session in the database: total hands, total result in bb, win rate in bb/100
-(the standard poker convention), sample variance/standard deviation of per-hand
-results, and a peak-to-trough/trough-to-peak "biggest downswing"/"biggest upswing"
-metric (not just the single best/worst hand - see the module docstring). Validated
-in `tests/test_stats_aggregator.py` against the real 15 hands now in the database
-(cross-checking sums, `statistics.variance`, and a brute-force swing reference) plus
-a hand-verifiable constructed sequence.
+`src/poker_analyzer/stats/aggregator.py` computes, per-session, per-stakes-level,
+and combined across every session in the database: total hands, total result in bb,
+win rate in bb/100 (the standard poker convention), sample variance/standard
+deviation of per-hand results, and a peak-to-trough/trough-to-peak "biggest
+downswing"/"biggest upswing" metric (not just the single best/worst hand - see the
+module docstring).
+
+### Per-stakes aggregation: bb isn't a fixed unit across stakes
+
+The database now has 64 hands across 7 sessions at two stake levels 10x apart in
+real dollar value: 0.10/0.20 (Andover home game, 15 hands) and 0.01/0.02 (ClubWPT
+Gold, 49 hands). The original "combined across everything" stat blended both into
+one bb/100 and variance number, treating a bb won at 0.10/0.20 (worth $0.20) as
+equivalent to a bb won at 0.01/0.02 (worth $0.02) - a real correctness bug, not just
+a caveat, once more than one stake level is in the database.
+
+**The fix:** `aggregate_stakes_stats` groups sessions by their `stakes` field (not
+per-session, not all sessions blended together) and reuses the same `_compute_stats`
+helper every other aggregation function already calls, so there's no second copy of
+the win-rate/variance/swing math to keep in sync. `aggregate_all` now returns a
+`by_stakes` list alongside `sessions` and `combined`, and `poker_cli.py stats` prints
+a new "Per stakes level" section between the per-session and combined blocks.
+
+This is a real design decision with more than one reasonable approach (decided with
+the user): keep the fully-blended "combined across everything" view alongside the
+new per-stakes breakdown, with a clear label that it mixes incomparable units, or
+drop it in favor of per-stakes summaries only. Keeping it - relabeled
+`"All sessions (mixed stakes)"` and printed with an explicit blend warning - was
+chosen because it matches this project's existing style of surfacing caveats
+instead of removing data (see the Monte Carlo fallback section above), and because
+dropping it would mean touching `dashboard/data_prep.py`'s `session_summary_table`,
+which reuses `aggregate_all()["combined"]` internally and was out of scope this
+session.
+
+**What the real numbers show, and why this matters:** with the old blended view,
+the database reads as a comfortably winning +165.62 bb/100 overall. Broken out by
+stakes, that number is almost entirely the 0.10/0.20 sessions (+853.33 bb/100 over
+15 hands); the 0.01/0.02 sessions are actually losing, -44.90 bb/100 over 49 hands.
+Both samples are still far too small to draw a real conclusion from (the same
+caveat this module has always carried), but the blended number wasn't just noisy -
+it was actively misleading about which stakes hero is winning at, exactly the
+failure mode per-stakes aggregation exists to catch.
 
 ```bash
 python scripts/poker_cli.py stats --db poker_hands.db
 ```
 
-With only 15 hands loaded, none of these numbers - especially bb/100 - are
-statistically meaningful yet; the command prints that caveat alongside the numbers.
-This is a correctness check on the calculation pipeline, not a performance read.
+Validated in `tests/test_stats_aggregator.py` against the real 64-hand, 7-session,
+2-stake-level database (`data/templates/real_hands.csv` +
+`data/templates/online_hands.csv`, loaded together) - per-stakes hand counts/results
+reconciled against both the combined total and an independent per-session sum,
+`statistics.variance` and a brute-force swing reference cross-checked against one
+stakes group each, and stakes ordered ascending by big blind size - plus the
+existing hand-verifiable constructed swing sequence, updated from the old 15-hand/
+2-session numbers to the current 64-hand/7-session database.
+
+With still only 64 hands loaded across the two stake levels, none of these numbers -
+especially bb/100 - are statistically meaningful yet; the command prints that
+caveat alongside the numbers. This remains a correctness check on the calculation
+pipeline, not a real performance read, at either stakes level.
 
 ## Dashboard
 
@@ -569,7 +616,8 @@ Built so far:
 - [x] CSV validator for hand-log files, with pytest coverage
 - [x] Equity calculator, validated against known spots
 - [x] Hand data ingestion pipeline (CSV -> validated -> loaded into SQLite), with pytest coverage
-- [x] 15 real hands loaded into the database, across 2 sessions
+- [x] 64 real hands loaded into the database, across 7 sessions at 2 stake levels
+      (0.10/0.20 Andover home game, 0.01/0.02 ClubWPT Gold)
 - [x] Preflop EV engine: decision-level EV vs. folding, +EV/-EV/marginal flagging,
       Chen-formula opponent range assignment - validated against real hands and
       textbook spots
@@ -589,7 +637,16 @@ Built so far:
       outright now show clearly higher EV than the old showdown-only numbers), the
       existing postflop textbook spot, and direct unit tests of the fold-equity math.
 - [x] Session aggregation (win rate in bb/100, variance, std dev, up/downswing
-      tracking) - per-session and combined, validated against the 15 real hands
+      tracking) - per-session, per-stakes-level, and combined, validated against
+      the real 64-hand, 2-stake-level database
+- [x] Per-stakes aggregation (`aggregate_stakes_stats`): groups sessions by their
+      `stakes` field so a bb at one stake level (real dollar value can differ 10x
+      between stakes) isn't blended with a bb at another - reuses `_compute_stats`
+      rather than duplicating the win-rate/variance/swing math, surfaced in
+      `poker_cli.py stats`'s new "Per stakes level" section. The old fully-blended
+      "combined across everything" view is kept alongside it (decided with the
+      user) but now labeled `"All sessions (mixed stakes)"` with an explicit
+      warning rather than reading as a real win-rate number
 - [x] Leak detection (`leaks/detector.py`): groups EV-flagged decisions by
       (position, street, action type) pattern and flags patterns that skew -EV/
       marginal across multiple hands, not just a single hand's flag - reuses
