@@ -29,7 +29,7 @@ from poker_analyzer.leaks.detector import MIN_SAMPLE_SIZE, PatternLeak, detect_l
 from poker_analyzer.stats.aggregator import print_summary
 from poker_analyzer.validation.validator import validate_hand_log_csv
 
-DEFAULT_DB_PATH = "poker_hands.db"
+DEFAULT_DB_PATH: str | None = None
 
 app = typer.Typer(
     help="Poker Hand Analyzer: validate hand logs, ingest them, and report stats/EV.",
@@ -74,7 +74,11 @@ def ingest(
 
 @app.command()
 def stats(
-    db: str = typer.Option(DEFAULT_DB_PATH, "--db", help="Path to the SQLite database"),
+    db: Optional[str] = typer.Option(
+        DEFAULT_DB_PATH,
+        "--db",
+        help="Path to a local SQLite database file. Omit to read from Postgres (SUPABASE_DB_URL) instead.",
+    ),
 ) -> None:
     """Print per-session and combined win rate / variance / swing stats."""
     print_summary(db)
@@ -109,7 +113,11 @@ def _format_decision(decision: PreflopDecision | PostflopDecision, street: str |
 
 @app.command("ev-report")
 def ev_report(
-    db: str = typer.Option(DEFAULT_DB_PATH, "--db", help="Path to the SQLite database"),
+    db: Optional[str] = typer.Option(
+        DEFAULT_DB_PATH,
+        "--db",
+        help="Path to a local SQLite database file. Omit to read from Postgres (SUPABASE_DB_URL) instead.",
+    ),
     trials: int = typer.Option(
         DEFAULT_TRIALS_PER_COMBO, "--trials", help="Equity simulation trials per opponent range combo"
     ),
@@ -177,7 +185,11 @@ _LEAK_SECTIONS = [
 
 @app.command()
 def leaks(
-    db: str = typer.Option(DEFAULT_DB_PATH, "--db", help="Path to the SQLite database"),
+    db: Optional[str] = typer.Option(
+        DEFAULT_DB_PATH,
+        "--db",
+        help="Path to a local SQLite database file. Omit to read from Postgres (SUPABASE_DB_URL) instead.",
+    ),
     trials: int = typer.Option(
         DEFAULT_TRIALS_PER_COMBO, "--trials", help="Equity simulation trials per opponent range combo"
     ),

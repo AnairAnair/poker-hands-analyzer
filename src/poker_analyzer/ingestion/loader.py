@@ -6,10 +6,10 @@ Chains: parse -> validate -> load. Each row is one hand. A session is a
 creates the session row, later hands for the same triple reuse it.
 
 Writes to Postgres (SUPABASE_DB_URL, via db/connection.py) by default. Pass
-an explicit sqlite_db_path to write to a local SQLite file instead - that
-mode only exists so stats/ev/leaks/dashboard (and their tests), which still
-read local SQLite directly, keep working unchanged until their own
-migration - see db/connection.py's module docstring. Production code (this
+an explicit sqlite_db_path to write to a local SQLite file instead - that mode
+only exists for the dual-mode test fixtures (stats/ev/leaks/dashboard's tests),
+which build their own throwaway local SQLite database rather than touching
+Postgres - see db/connection.py's module docstring. Production code (this
 project's CLI) always uses the Postgres mode.
 
 Two things the CSV format does not capture, by design of the current

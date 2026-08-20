@@ -11,12 +11,15 @@ Two kinds of coverage, per the task:
   outside of mocks too.
 """
 
+import uuid
 from pathlib import Path
 
+import psycopg
 import pytest
 from typer.testing import CliRunner
 
 from poker_analyzer import cli
+from poker_analyzer.db.connection import get_db_url
 from poker_analyzer.db.init_db import init_db
 from poker_analyzer.ev.engine import PostflopDecision, PreflopDecision
 from poker_analyzer.ingestion.loader import IngestionError
@@ -560,39 +563,42 @@ def test_validate_end_to_end_against_template_csv():
     assert "Validation passed" in result.stdout
 
 
-_SKIP_REASON = (
-    "ingest now writes exclusively to Postgres (SUPABASE_DB_URL) after the "
-    "SQLite -> Postgres migration, but stats/ev-report/leaks still read a "
-    "local SQLite file (out of scope for that migration - see db/connection.py). "
-    "The two can no longer share a db file in one pipeline run. Un-skip once "
-    "stats/ev/leaks get their own Postgres migration."
-)
+@pytest.fixture
+def isolated_pg_schema(monkeypatch):
+    """
+    Point every test using this fixture at a throwaway, uniquely-named Postgres
+    schema instead of the real 'poker_analyzer' schema, so the chained
+    ingest -> stats/ev-report/leaks tests below never read or write the real
+    migrated hand history in Supabase. Dropped again once the test finishes.
+    Same pattern as test_ingestion.py's fixture of the same name.
+    """
+    schema = f"test_cli_{uuid.uuid4().hex[:12]}"
+    monkeypatch.setenv("POKER_ANALYZER_PG_SCHEMA", schema)
+    yield
+    conn = psycopg.connect(get_db_url())
+    conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+    conn.commit()
+    conn.close()
 
 
-@pytest.mark.skip(reason=_SKIP_REASON)
-def test_ingest_and_stats_end_to_end(tmp_path):
-    db_path = tmp_path / "poker.db"
-    init_db(db_path)
+def test_ingest_and_stats_end_to_end(isolated_pg_schema):
+    init_db()
 
-    ingest_result = runner.invoke(cli.app, ["ingest", str(REAL_HANDS_CSV), "--db", str(db_path)])
+    ingest_result = runner.invoke(cli.app, ["ingest", str(REAL_HANDS_CSV)])
     assert ingest_result.exit_code == 0
     assert "Loaded 15 hand(s)" in ingest_result.stdout
 
-    stats_result = runner.invoke(cli.app, ["stats", "--db", str(db_path)])
+    stats_result = runner.invoke(cli.app, ["stats"])
     assert stats_result.exit_code == 0
     assert "Per stakes level:" in stats_result.stdout
     assert "Combined (all sessions, MIXED STAKES" in stats_result.stdout
 
 
-@pytest.mark.skip(reason=_SKIP_REASON)
-def test_ev_report_end_to_end(tmp_path):
-    db_path = tmp_path / "poker.db"
-    init_db(db_path)
-    runner.invoke(cli.app, ["ingest", str(REAL_HANDS_CSV), "--db", str(db_path)])
+def test_ev_report_end_to_end(isolated_pg_schema):
+    init_db()
+    runner.invoke(cli.app, ["ingest", str(REAL_HANDS_CSV)])
 
-    result = runner.invoke(
-        cli.app, ["ev-report", "--db", str(db_path), "--trials", "20", "--seed", "1"]
-    )
+    result = runner.invoke(cli.app, ["ev-report", "--trials", "20", "--seed", "1"])
 
     assert result.exit_code == 0
     assert "Hand 1" in result.stdout
@@ -600,13 +606,11 @@ def test_ev_report_end_to_end(tmp_path):
     assert "flag:" in result.stdout
 
 
-@pytest.mark.skip(reason=_SKIP_REASON)
-def test_leaks_end_to_end(tmp_path):
-    db_path = tmp_path / "poker.db"
-    init_db(db_path)
-    runner.invoke(cli.app, ["ingest", str(REAL_HANDS_CSV), "--db", str(db_path)])
+def test_leaks_end_to_end(isolated_pg_schema):
+    init_db()
+    runner.invoke(cli.app, ["ingest", str(REAL_HANDS_CSV)])
 
-    result = runner.invoke(cli.app, ["leaks", "--db", str(db_path), "--trials", "20", "--seed", "1"])
+    result = runner.invoke(cli.app, ["leaks", "--trials", "20", "--seed", "1"])
 
     assert result.exit_code == 0
     assert "Poker Hand Analyzer - Leak Report" in result.stdout
@@ -614,14 +618,12 @@ def test_leaks_end_to_end(tmp_path):
     assert "Insufficient data" in result.stdout
 
 
-@pytest.mark.skip(reason=_SKIP_REASON)
-def test_leaks_end_to_end_respects_custom_min_sample(tmp_path):
-    db_path = tmp_path / "poker.db"
-    init_db(db_path)
-    runner.invoke(cli.app, ["ingest", str(REAL_HANDS_CSV), "--db", str(db_path)])
+def test_leaks_end_to_end_respects_custom_min_sample(isolated_pg_schema):
+    init_db()
+    runner.invoke(cli.app, ["ingest", str(REAL_HANDS_CSV)])
 
     strict_result = runner.invoke(
-        cli.app, ["leaks", "--db", str(db_path), "--trials", "20", "--seed", "1", "--min-sample", "10"]
+        cli.app, ["leaks", "--trials", "20", "--seed", "1", "--min-sample", "10"]
     )
 
     assert strict_result.exit_code == 0

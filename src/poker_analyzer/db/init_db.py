@@ -5,10 +5,10 @@ local SQLite file when given an explicit path.
     python3 src/poker_analyzer/db/init_db.py                 # Postgres (SUPABASE_DB_URL)
     python3 src/poker_analyzer/db/init_db.py --db poker.db   # local SQLite file
 
-The SQLite mode only exists so stats/ev/leaks/dashboard (and their tests),
-which still read local SQLite directly, keep working unchanged until their
-own migration - see connection.py's module docstring. Production code (this
-project's CLI) always uses the Postgres mode.
+The SQLite mode only exists for the dual-mode test fixtures (stats/ev/leaks/
+dashboard's tests), which build their own throwaway local SQLite database
+rather than touching Postgres - see connection.py's module docstring.
+Production code (this project's CLI) always uses the Postgres mode.
 
 Safe to re-run either mode: every statement in both schema files uses
 CREATE TABLE IF NOT EXISTS.

@@ -138,9 +138,16 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Union
 
+import psycopg
+
+from poker_analyzer.db.connection import get_connection
 from poker_analyzer.equity.calculator import calculate_equity
 from poker_analyzer.ev.ranges import range_combos_for_band
+
+Connection = Union[sqlite3.Connection, psycopg.Connection]
 
 # Opponent's range on an OPENING raise (the street's first bet/raise), by their position.
 # Tighter in early position, wider on the button/blinds - standard shape. BB's number is
@@ -201,6 +208,21 @@ DEFAULT_TRIALS_PER_COMBO = 300
 
 class EVEngineError(Exception):
     pass
+
+
+def _connect(db_path: str | Path | None) -> Connection:
+    """
+    db_path given -> a local SQLite file (only the dual-mode test fixtures use
+    this). Omitted -> the shared Postgres connection (get_connection()), the
+    production path - same convention as ingestion/loader.py's _connect.
+    """
+    if db_path is not None:
+        return sqlite3.connect(db_path)
+    return get_connection()
+
+
+def _placeholder(conn: Connection) -> str:
+    return "?" if isinstance(conn, sqlite3.Connection) else "%s"
 
 
 @dataclass(frozen=True)
@@ -464,14 +486,15 @@ def _reconstruct_postflop_street(
 
 
 def analyze_hand_preflop(
-    conn: sqlite3.Connection,
+    conn: Connection,
     hand_id: int,
     trials_per_combo: int = DEFAULT_TRIALS_PER_COMBO,
     seed: int | None = None,
 ) -> list[PreflopDecision]:
     """Compute a PreflopDecision for every preflop action hero took in the given hand."""
+    p = _placeholder(conn)
     hand_row = conn.execute(
-        "SELECT session_id, hero_position, hero_hole_cards FROM hands WHERE hand_id = ?",
+        f"SELECT session_id, hero_position, hero_hole_cards FROM hands WHERE hand_id = {p}",
         (hand_id,),
     ).fetchone()
     if hand_row is None:
@@ -479,10 +502,10 @@ def analyze_hand_preflop(
     session_id, hero_position, hero_hole_cards = hand_row
 
     action_rows = conn.execute(
-        """
+        f"""
         SELECT actor_position, action_type, amount_bb
         FROM actions
-        WHERE hand_id = ? AND street = 'preflop'
+        WHERE hand_id = {p} AND street = 'preflop'
         ORDER BY action_order
         """,
         (hand_id,),
@@ -580,12 +603,16 @@ def analyze_hand_preflop(
 
 
 def analyze_all_preflop_decisions(
-    db_path: str,
+    db_path: str | Path | None = None,
     trials_per_combo: int = DEFAULT_TRIALS_PER_COMBO,
     seed: int | None = None,
 ) -> list[PreflopDecision]:
-    """Run analyze_hand_preflop over every hand currently in the database."""
-    conn = sqlite3.connect(db_path)
+    """
+    Run analyze_hand_preflop over every hand currently in the database. Reads
+    from Postgres (SUPABASE_DB_URL) by default; pass db_path to read a local
+    SQLite file instead (see _connect).
+    """
+    conn = _connect(db_path)
     try:
         hand_ids = [row[0] for row in conn.execute("SELECT hand_id FROM hands ORDER BY hand_id")]
         decisions = []
@@ -620,7 +647,7 @@ def _board_through(
 
 
 def analyze_hand_postflop(
-    conn: sqlite3.Connection,
+    conn: Connection,
     hand_id: int,
     trials_per_combo: int = DEFAULT_TRIALS_PER_COMBO,
     seed: int | None = None,
@@ -629,10 +656,11 @@ def analyze_hand_postflop(
     Compute a PostflopDecision for every flop/turn/river action hero took in the
     given hand. Returns an empty list for a hand that ended preflop (no flop dealt).
     """
+    p = _placeholder(conn)
     hand_row = conn.execute(
-        """
+        f"""
         SELECT session_id, hero_position, hero_hole_cards, board_flop, board_turn, board_river
-        FROM hands WHERE hand_id = ?
+        FROM hands WHERE hand_id = {p}
         """,
         (hand_id,),
     ).fetchone()
@@ -641,10 +669,10 @@ def analyze_hand_postflop(
     session_id, hero_position, hero_hole_cards, board_flop, board_turn, board_river = hand_row
 
     preflop_action_rows = conn.execute(
-        """
+        f"""
         SELECT actor_position, action_type, amount_bb
         FROM actions
-        WHERE hand_id = ? AND street = 'preflop'
+        WHERE hand_id = {p} AND street = 'preflop'
         ORDER BY action_order
         """,
         (hand_id,),
@@ -663,10 +691,10 @@ def analyze_hand_postflop(
             break  # hand ended before this street was dealt
 
         action_rows = conn.execute(
-            """
+            f"""
             SELECT actor_position, action_type, amount_bb
             FROM actions
-            WHERE hand_id = ? AND street = ?
+            WHERE hand_id = {p} AND street = {p}
             ORDER BY action_order
             """,
             (hand_id, street),
@@ -771,12 +799,16 @@ def analyze_hand_postflop(
 
 
 def analyze_all_postflop_decisions(
-    db_path: str,
+    db_path: str | Path | None = None,
     trials_per_combo: int = DEFAULT_TRIALS_PER_COMBO,
     seed: int | None = None,
 ) -> list[PostflopDecision]:
-    """Run analyze_hand_postflop over every hand currently in the database."""
-    conn = sqlite3.connect(db_path)
+    """
+    Run analyze_hand_postflop over every hand currently in the database. Reads
+    from Postgres (SUPABASE_DB_URL) by default; pass db_path to read a local
+    SQLite file instead (see _connect).
+    """
+    conn = _connect(db_path)
     try:
         hand_ids = [row[0] for row in conn.execute("SELECT hand_id FROM hands ORDER BY hand_id")]
         decisions = []

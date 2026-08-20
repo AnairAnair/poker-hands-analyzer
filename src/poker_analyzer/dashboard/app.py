@@ -12,9 +12,14 @@ section for how to launch it.
 
 Streamlit over static matplotlib charts: the dashboard needs several linked views
 (a time series, a categorical breakdown, a summary table) re-read from the live
-SQLite db on every run, plus basic interactivity (a session filter) - a single-file,
+database on every run, plus basic interactivity (a session filter) - a single-file,
 no-HTML app framework fits that better than generating and re-embedding static image
 files for each view.
+
+Reads from Postgres (SUPABASE_DB_URL, via db/connection.py) by default, same as the
+CLI - see data_prep.py. The sidebar's "Local SQLite path" field is optional and only
+useful for pointing at a local SQLite file (e.g. one built by a test fixture); leave
+it blank for the normal Postgres-backed case.
 """
 
 from __future__ import annotations
@@ -40,8 +45,6 @@ from poker_analyzer.dashboard.data_prep import (
 )
 from poker_analyzer.ev.engine import DEFAULT_TRIALS_PER_COMBO
 
-DEFAULT_DB_PATH = "poker_hands.db"
-
 # Reserved status hues (not generic categorical colors) - +EV/-EV/marginal/baseline are
 # quality judgments on a decision, not arbitrary series identities, so they get the
 # status palette rather than a cycled categorical one.
@@ -59,7 +62,13 @@ st.title("Poker Hand Analyzer")
 
 with st.sidebar:
     st.header("Settings")
-    db_path = st.text_input("Database path", value=DEFAULT_DB_PATH)
+    db_path_input = st.text_input(
+        "Local SQLite path (optional)",
+        value="",
+        help="Leave blank to read from Postgres (SUPABASE_DB_URL), the normal case. "
+        "Only set this to point at a local SQLite file instead.",
+    )
+    db_path = db_path_input or None
     trials = st.number_input(
         "EV equity trials per opponent combo",
         min_value=20,
@@ -74,10 +83,10 @@ with st.sidebar:
     )
     seed = st.number_input("Seed", min_value=0, value=0, step=1, disabled=not use_seed)
 
-if not Path(db_path).exists():
+if db_path is not None and not Path(db_path).exists():
     st.error(
-        f"No database found at `{db_path}`. Run `python scripts/poker_cli.py ingest` "
-        "first, or point this at an existing database."
+        f"No local SQLite database found at `{db_path}`. Clear the sidebar field to "
+        "read from Postgres instead, or point this at an existing SQLite file."
     )
     st.stop()
 

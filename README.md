@@ -19,7 +19,10 @@ directing an AI coding tool through this build.
 
 - Python 3.11+
 - [pandas](https://pandas.pydata.org/) for data manipulation and aggregation
-- SQLite (stdlib `sqlite3`) for persistent storage
+- [Postgres](https://www.postgresql.org/), hosted on [Supabase](https://supabase.com/),
+  for persistent storage (via [psycopg](https://www.psycopg.org/psycopg3/)) - see
+  "Database" below. SQLite (stdlib `sqlite3`) still exists as a dual-mode escape
+  hatch used only by test fixtures.
 - [treys](https://github.com/ihendley/treys) for hand evaluation and equity calculation
 - [Typer](https://typer.tiangolo.com/) for the CLI
 - [pytest](https://docs.pytest.org/) for tests
@@ -43,10 +46,13 @@ poker-hand-analyzer/
 │   └── poker_analyzer/
 │       ├── cli.py                    # unified Typer CLI: validate / ingest / stats / ev-report
 │       ├── db/
-│       │   ├── schema.sql            # sessions / hands / actions tables
-│       │   └── init_db.py            # creates a SQLite DB from schema.sql
+│       │   ├── connection.py         # shared get_connection() - the only place SUPABASE_DB_URL is read
+│       │   ├── schema.sql            # sessions / hands / actions tables (Postgres)
+│       │   ├── schema_sqlite.sql     # same schema, SQLite dialect (test fixtures only)
+│       │   ├── init_db.py            # creates the schema - Postgres by default, or a local SQLite file
+│       │   └── migrate_to_postgres.py  # one-time SQLite -> Postgres data migration (already run)
 │       ├── ingestion/
-│       │   └── loader.py             # CSV -> validated -> loaded into SQLite
+│       │   └── loader.py             # CSV -> validated -> loaded into Postgres
 │       ├── equity/
 │       │   └── calculator.py         # treys-based equity calculator
 │       ├── ev/
@@ -82,13 +88,47 @@ pip install -r requirements.txt
 
 ## Database
 
-Create a local SQLite database from the schema (structure only, no data):
+Storage is Postgres, hosted on [Supabase](https://supabase.com/). Every production
+code path - ingestion, the EV engine, stats aggregation, leak detection, and the
+dashboard - goes through one shared `get_connection()` in
+`src/poker_analyzer/db/connection.py`, the only place the `SUPABASE_DB_URL`
+connection string is read. Tables live in a dedicated `poker_analyzer` Postgres
+schema (not `public`), since this Supabase project also hosts an unrelated app's
+own tables - see `connection.py`'s module docstring.
 
-```bash
-python3 src/poker_analyzer/db/init_db.py --db poker_hands.db
-```
+Setup:
+
+1. Copy `.env.example` to `.env` and fill in a real `SUPABASE_DB_URL` (see the
+   comments in that file for the connection-string format, including how to
+   percent-encode special characters in the password).
+2. Create the schema (structure only, no data):
+
+   ```bash
+   python3 src/poker_analyzer/db/init_db.py
+   ```
 
 See `src/poker_analyzer/db/schema.sql` for the full schema and comments.
+
+**Local SQLite (test fixtures only).** Every DB-facing module - `init_db.py`,
+`ingestion/loader.py`, `stats/aggregator.py`, `ev/engine.py`, and
+`dashboard/data_prep.py` - also accepts an explicit local SQLite file path
+(`--db` on the CLI, or a `db_path`/`sqlite_db_path` argument at the Python level)
+as a dual-mode escape hatch: pass one and that call reads/writes a local SQLite
+file via the stdlib `sqlite3` instead of Postgres. This exists solely so the test
+suite can build small, throwaway, fully-isolated databases per test
+(`tests/test_ev_engine.py`, `test_stats_aggregator.py`, `test_leak_detector.py`,
+`test_dashboard_data_prep.py`) without touching the real Supabase data - production
+usage (the CLI and dashboard with no `--db`/path given) always targets Postgres.
+`src/poker_analyzer/db/schema_sqlite.sql` is the same schema in SQLite's dialect,
+used only by this mode. The CLI-chained tests in `tests/test_cli.py`
+(ingest -> stats/ev-report/leaks) instead run against a throwaway, uniquely-named
+Postgres schema per test run (`POKER_ANALYZER_PG_SCHEMA`, set by an `isolated_pg_schema`
+pytest fixture) - that path exercises the real production Postgres wiring end to
+end rather than the SQLite fixture mode.
+
+One-time migration: `src/poker_analyzer/db/migrate_to_postgres.py` moved the
+original local-SQLite hand history into Postgres, verified field-by-field. It's a
+completed, one-shot script, not part of the regular workflow above.
 
 ## Logging hands
 
@@ -108,23 +148,29 @@ duplicate or drift out of sync with.
 python scripts/poker_cli.py --help
 
 python scripts/poker_cli.py validate data/templates/hand_log_template.csv
-python scripts/poker_cli.py ingest data/templates/real_hands.csv --db poker_hands.db
-python scripts/poker_cli.py stats --db poker_hands.db
-python scripts/poker_cli.py ev-report --db poker_hands.db
-python scripts/poker_cli.py leaks --db poker_hands.db
+python scripts/poker_cli.py ingest data/templates/real_hands.csv
+python scripts/poker_cli.py stats
+python scripts/poker_cli.py ev-report
+python scripts/poker_cli.py leaks
 ```
+
+With no `--db` given, every subcommand reads/writes Postgres (`SUPABASE_DB_URL`,
+via `db/connection.py`) - the normal case. `--db` on `stats`/`ev-report`/`leaks`
+is a dual-mode escape hatch that points that one run at a local SQLite file
+instead (see the "Database" section above); `ingest` has no `--db` option at all,
+since it always writes to Postgres.
 
 | Subcommand  | Wraps                                  | Key options |
 |-------------|-----------------------------------------|--------------|
 | `validate`  | `validation/validator.py`               | `csv_path` |
-| `ingest`    | `ingestion/loader.py`                   | `csv_path`, `--db`, `--buy-in-cents` |
-| `stats`     | `stats/aggregator.py`                   | `--db` |
-| `ev-report` | `ev/engine.py`                          | `--db`, `--trials`, `--seed` |
-| `leaks`     | `leaks/detector.py` (via `ev/engine.py`)| `--db`, `--trials`, `--seed`, `--min-sample` |
+| `ingest`    | `ingestion/loader.py`                   | `csv_path`, `--buy-in-cents` |
+| `stats`     | `stats/aggregator.py`                   | `--db` (optional, local SQLite only) |
+| `ev-report` | `ev/engine.py`                          | `--db` (optional, local SQLite only), `--trials`, `--seed` |
+| `leaks`     | `leaks/detector.py` (via `ev/engine.py`)| `--db` (optional, local SQLite only), `--trials`, `--seed`, `--min-sample` |
 
 Run `python scripts/poker_cli.py <subcommand> --help` for full option details.
-Tested end-to-end (and with each subcommand's dispatch to its underlying module
-verified independently of the real logic) in `tests/test_cli.py`.
+Tested end-to-end against Postgres (and with each subcommand's dispatch to its
+underlying module verified independently of the real logic) in `tests/test_cli.py`.
 
 ## CSV validator
 
@@ -281,7 +327,7 @@ target for a future one.
 ```python
 from poker_analyzer.ev.engine import analyze_all_preflop_decisions
 
-for decision in analyze_all_preflop_decisions("poker_hands.db"):
+for decision in analyze_all_preflop_decisions():  # reads Postgres; pass a path for local SQLite
     print(decision.hand_id, decision.action_type, decision.hero_equity_pct, decision.flag)
     print(decision.fold_pct, decision.continuing_range_band)  # bet/raise only, else None
 ```
@@ -292,7 +338,7 @@ hero's position, the action taken, the `+EV`/`-EV`/`marginal` flag, and the equi
 numbers behind it (folds print as `baseline` - no EV is computed for a $0-cost action):
 
 ```bash
-python scripts/poker_cli.py ev-report --db poker_hands.db
+python scripts/poker_cli.py ev-report
 
 # Poker Hand Analyzer - EV Report
 # ============================================
@@ -395,7 +441,7 @@ appears, preflop or postflop.
 ```python
 from poker_analyzer.ev.engine import analyze_all_postflop_decisions
 
-for decision in analyze_all_postflop_decisions("poker_hands.db"):
+for decision in analyze_all_postflop_decisions():  # reads Postgres; pass a path for local SQLite
     print(decision.hand_id, decision.street, decision.board, decision.hero_equity_pct, decision.flag)
     print(decision.fold_pct, decision.continuing_range_band)  # bet/raise only, else None
 ```
@@ -461,7 +507,7 @@ pattern, which has grown from 6 to 10 occurrences but is still `marginal`
 (matching the finding written up in [WRITEUP.md](./WRITEUP.md)):
 
 ```bash
-python scripts/poker_cli.py leaks --db poker_hands.db
+python scripts/poker_cli.py leaks
 
 # Poker Hand Analyzer - Leak Report
 # ============================================
@@ -556,7 +602,7 @@ it was actively misleading about which stakes hero is winning at, exactly the
 failure mode per-stakes aggregation exists to catch.
 
 ```bash
-python scripts/poker_cli.py stats --db poker_hands.db
+python scripts/poker_cli.py stats
 ```
 
 Validated in `tests/test_stats_aggregator.py` against the real 64-hand, 7-session,
@@ -588,10 +634,12 @@ includes Streamlit):
 streamlit run src/poker_analyzer/dashboard/app.py
 ```
 
-This opens the dashboard in your browser at `http://localhost:8501`. The sidebar has
-the database path (defaults to `poker_hands.db`) and the equity-simulation trial
-count/seed used for the preflop EV breakdown - lower the trial count for a faster,
-noisier load.
+This opens the dashboard in your browser at `http://localhost:8501`. It reads from
+Postgres (`SUPABASE_DB_URL`) by default, same as the CLI. The sidebar has an
+optional local-SQLite-path field (leave it blank for the normal Postgres case;
+only set it to point at a local SQLite file instead) and the equity-simulation
+trial count/seed used for the preflop EV breakdown - lower the trial count for a
+faster, noisier load.
 
 The page has three sections:
 
@@ -621,11 +669,11 @@ against the real database and checking each section against the CLI's
 Built so far:
 
 - [x] Project scaffolding
-- [x] SQLite schema (sessions, hands, actions) - structure only
+- [x] Database schema (sessions, hands, actions) - structure only
 - [x] CSV hand-log template + guide
 - [x] CSV validator for hand-log files, with pytest coverage
 - [x] Equity calculator, validated against known spots
-- [x] Hand data ingestion pipeline (CSV -> validated -> loaded into SQLite), with pytest coverage
+- [x] Hand data ingestion pipeline (CSV -> validated -> loaded into the database), with pytest coverage
 - [x] 64 real hands loaded into the database, across 7 sessions at 2 stake levels
       (0.10/0.20 Andover home game, 0.01/0.02 ClubWPT Gold)
 - [x] Preflop EV engine: decision-level EV vs. folding, +EV/-EV/marginal flagging,
@@ -684,6 +732,13 @@ Built so far:
       after runtime, and the regression tests confirming no real hand's +EV/-EV/
       marginal flag changed
 - [x] Portfolio writeup ([WRITEUP.md](./WRITEUP.md))
+- [x] Migrated storage from local SQLite to a hosted Postgres database
+      (Supabase) - a shared `get_connection()` (`db/connection.py`) is now the
+      single place every production code path (ingestion, the EV engine, stats
+      aggregation, leak detection, and the dashboard) talks to the database,
+      closing the split where ingestion had moved to Postgres but the rest
+      still read a local SQLite file. Local SQLite remains only as a dual-mode
+      escape hatch for test fixtures - see the "Database" section above.
 
 Not built yet (later sessions, per the project spec's build phases):
 

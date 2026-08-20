@@ -1,9 +1,13 @@
 """
 Shared Postgres connection layer for the Poker Hand Analyzer.
 
-Every module that talks to the database goes through get_connection() here
-instead of opening its own connection - this is the only place SUPABASE_DB_URL
-is read and the only place a psycopg connection is actually opened.
+Every production code path that talks to the database - ingestion, the EV
+engine, stats aggregation, leak detection, and the dashboard - goes through
+get_connection() here instead of opening its own connection. This is the only
+place SUPABASE_DB_URL is read and the only place a psycopg connection is
+actually opened. (Those same modules also accept an explicit local-SQLite path
+as a dual-mode escape hatch, used only by test fixtures - see e.g.
+ingestion/loader.py's module docstring.)
 
 Tables live in a dedicated "poker_analyzer" Postgres schema, not "public" -
 this Supabase project also hosts Voice Hand Logger's own (unrelated) tables

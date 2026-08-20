@@ -51,6 +51,14 @@ from __future__ import annotations
 import sqlite3
 import statistics
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Union
+
+import psycopg
+
+from poker_analyzer.db.connection import get_connection
+
+Connection = Union[sqlite3.Connection, psycopg.Connection]
 
 
 @dataclass(frozen=True)
@@ -114,19 +122,35 @@ def _compute_stats(
     )
 
 
-def session_hand_results(conn: sqlite3.Connection, session_id: int) -> list[tuple[int, int, float]]:
+def _connect(db_path: str | Path | None) -> Connection:
+    """
+    db_path given -> a local SQLite file (only the dual-mode test fixtures use
+    this). Omitted -> the shared Postgres connection (get_connection()), the
+    production path - same convention as ingestion/loader.py's _connect.
+    """
+    if db_path is not None:
+        return sqlite3.connect(db_path)
+    return get_connection()
+
+
+def _placeholder(conn: Connection) -> str:
+    return "?" if isinstance(conn, sqlite3.Connection) else "%s"
+
+
+def session_hand_results(conn: Connection, session_id: int) -> list[tuple[int, int, float]]:
     """(hand_id, hand_number, result_bb) for one session's logged-result hands, hand_number order."""
+    p = _placeholder(conn)
     return conn.execute(
-        """
+        f"""
         SELECT hand_id, hand_number, result_bb FROM hands
-        WHERE session_id = ? AND result_bb IS NOT NULL
+        WHERE session_id = {p} AND result_bb IS NOT NULL
         ORDER BY hand_number
         """,
         (session_id,),
     ).fetchall()
 
 
-def combined_hand_results(conn: sqlite3.Connection) -> list[tuple[int, int, float]]:
+def combined_hand_results(conn: Connection) -> list[tuple[int, int, float]]:
     """(hand_id, session_id, result_bb) for every logged-result hand, in hand_id (insertion) order."""
     return conn.execute(
         """
@@ -137,21 +161,22 @@ def combined_hand_results(conn: sqlite3.Connection) -> list[tuple[int, int, floa
     ).fetchall()
 
 
-def stakes_hand_results(conn: sqlite3.Connection, stakes: str) -> list[tuple[int, int, float]]:
+def stakes_hand_results(conn: Connection, stakes: str) -> list[tuple[int, int, float]]:
     """(hand_id, session_id, result_bb) for every logged-result hand at this stakes level, hand_id order."""
+    p = _placeholder(conn)
     return conn.execute(
-        """
+        f"""
         SELECT h.hand_id, h.session_id, h.result_bb
         FROM hands h
         JOIN sessions s ON s.session_id = h.session_id
-        WHERE s.stakes = ? AND h.result_bb IS NOT NULL
+        WHERE s.stakes = {p} AND h.result_bb IS NOT NULL
         ORDER BY h.hand_id
         """,
         (stakes,),
     ).fetchall()
 
 
-def aggregate_session_stats(conn: sqlite3.Connection) -> list[AggregateStats]:
+def aggregate_session_stats(conn: Connection) -> list[AggregateStats]:
     """One AggregateStats per session, in session_id order (swings use hand_number order)."""
     sessions = conn.execute(
         "SELECT session_id, session_date, location, stakes FROM sessions ORDER BY session_id"
@@ -165,7 +190,7 @@ def aggregate_session_stats(conn: sqlite3.Connection) -> list[AggregateStats]:
     return stats
 
 
-def aggregate_stakes_stats(conn: sqlite3.Connection) -> list[AggregateStats]:
+def aggregate_stakes_stats(conn: Connection) -> list[AggregateStats]:
     """
     One AggregateStats per distinct stakes level (grouping sessions by their
     `stakes` field, not per-session and not all sessions blended together),
@@ -185,7 +210,7 @@ def aggregate_stakes_stats(conn: sqlite3.Connection) -> list[AggregateStats]:
     return stats
 
 
-def aggregate_combined_stats(conn: sqlite3.Connection) -> AggregateStats:
+def aggregate_combined_stats(conn: Connection) -> AggregateStats:
     """
     One AggregateStats across every hand in the database, in hand_id (insertion)
     order - blends every stakes level together. See the module docstring: kept
@@ -196,9 +221,13 @@ def aggregate_combined_stats(conn: sqlite3.Connection) -> AggregateStats:
     return _compute_stats("All sessions (mixed stakes)", None, results)
 
 
-def aggregate_all(db_path: str) -> dict:
-    """Convenience entry point: per-session, per-stakes, and combined stats, from a db path."""
-    conn = sqlite3.connect(db_path)
+def aggregate_all(db_path: str | Path | None = None) -> dict:
+    """
+    Convenience entry point: per-session, per-stakes, and combined stats. Reads
+    from Postgres (SUPABASE_DB_URL) by default; pass db_path to read a local
+    SQLite file instead (see _connect).
+    """
+    conn = _connect(db_path)
     try:
         return {
             "sessions": aggregate_session_stats(conn),
@@ -221,8 +250,12 @@ def _format_stats_block(stats: AggregateStats) -> str:
     )
 
 
-def print_summary(db_path: str = "poker_hands.db") -> None:
-    """Print a plain-text summary of per-session, per-stakes, and combined stats to stdout."""
+def print_summary(db_path: str | Path | None = None) -> None:
+    """
+    Print a plain-text summary of per-session, per-stakes, and combined stats to
+    stdout. Reads from Postgres (SUPABASE_DB_URL) by default; pass db_path to
+    read a local SQLite file instead (see _connect).
+    """
     result = aggregate_all(db_path)
     sessions = result["sessions"]
     by_stakes = result["by_stakes"]

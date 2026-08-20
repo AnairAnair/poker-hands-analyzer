@@ -5,9 +5,10 @@ typer>=0.12             # CLI framework
 pytest>=8.0
 streamlit>=1.35         # dashboard (dashboard/app.py); ships altair, used for charts
 
-# init_db.py and ingestion/loader.py talk to the hosted Supabase Postgres
-# database (SUPABASE_DB_URL) via db/connection.py. stats/ev/leaks/dashboard
-# still read local SQLite directly (sqlite3, stdlib) pending their own
-# migration - see db/connection.py's module docstring.
+# init_db.py, ingestion/loader.py, stats/aggregator.py, ev/engine.py, and
+# dashboard/data_prep.py all talk to the hosted Supabase Postgres database
+# (SUPABASE_DB_URL) via db/connection.py by default (sqlite3, stdlib, is still
+# used as a dual-mode escape hatch for test fixtures only) - see
+# db/connection.py's module docstring.
 psycopg[binary]>=3.2
 python-dotenv>=1.0

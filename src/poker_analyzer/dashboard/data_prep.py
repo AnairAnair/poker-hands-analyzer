@@ -20,9 +20,13 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import asdict, fields as dataclass_fields
+from pathlib import Path
+from typing import Union
 
 import pandas as pd
+import psycopg
 
+from poker_analyzer.db.connection import get_connection
 from poker_analyzer.ev.engine import (
     DEFAULT_TRIALS_PER_COMBO,
     PreflopDecision,
@@ -35,6 +39,8 @@ from poker_analyzer.stats.aggregator import (
     session_hand_results,
     win_rate_bb_per_100,
 )
+
+Connection = Union[sqlite3.Connection, psycopg.Connection]
 
 RESULTS_OVER_TIME_COLUMNS = [
     "hand_id",
@@ -51,7 +57,18 @@ RESULTS_OVER_TIME_COLUMNS = [
 PREFLOP_FLAG_ORDER = ["+EV", "-EV", "marginal", "baseline"]
 
 
-def results_over_time(db_path: str, session_id: int | None = None) -> pd.DataFrame:
+def _connect(db_path: str | Path | None) -> Connection:
+    """
+    db_path given -> a local SQLite file (only the dual-mode test fixtures use
+    this). Omitted -> the shared Postgres connection (get_connection()), the
+    production path - same convention as ingestion/loader.py's _connect.
+    """
+    if db_path is not None:
+        return sqlite3.connect(db_path)
+    return get_connection()
+
+
+def results_over_time(db_path: str | Path | None = None, session_id: int | None = None) -> pd.DataFrame:
     """
     One row per hand with a logged result, carrying:
     - result_bb: that hand's own result
@@ -70,7 +87,7 @@ def results_over_time(db_path: str, session_id: int | None = None) -> pd.DataFra
     show that session's slice of the all-time running total, which is a different (and
     for a single-session chart, wrong) number.
     """
-    conn = sqlite3.connect(db_path)
+    conn = _connect(db_path)
     try:
         if session_id is None:
             rows = [(hand_id, sid, result_bb) for hand_id, sid, result_bb in combined_hand_results(conn)]
@@ -107,7 +124,7 @@ def results_over_time(db_path: str, session_id: int | None = None) -> pd.DataFra
     return pd.DataFrame.from_records(records, columns=RESULTS_OVER_TIME_COLUMNS)
 
 
-def session_summary_table(db_path: str) -> pd.DataFrame:
+def session_summary_table(db_path: str | Path | None = None) -> pd.DataFrame:
     """
     One row per session plus a final "All sessions" combined row, straight from
     `aggregator.aggregate_all` - every column on AggregateStats, no recomputation.
@@ -118,7 +135,7 @@ def session_summary_table(db_path: str) -> pd.DataFrame:
 
 
 def preflop_decisions_dataframe(
-    db_path: str,
+    db_path: str | Path | None = None,
     trials_per_combo: int = DEFAULT_TRIALS_PER_COMBO,
     seed: int | None = None,
 ) -> pd.DataFrame:
