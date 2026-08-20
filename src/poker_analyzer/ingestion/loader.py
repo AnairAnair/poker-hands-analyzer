@@ -1,9 +1,16 @@
 """
-Ingestion pipeline: hand-log CSV -> validated -> loaded into SQLite.
+Ingestion pipeline: hand-log CSV -> validated -> loaded into the database.
 
 Chains: parse -> validate -> load. Each row is one hand. A session is a
 (session_date, location, stakes) triple; the first hand for a new session
 creates the session row, later hands for the same triple reuse it.
+
+Writes to Postgres (SUPABASE_DB_URL, via db/connection.py) by default. Pass
+an explicit sqlite_db_path to write to a local SQLite file instead - that
+mode only exists so stats/ev/leaks/dashboard (and their tests), which still
+read local SQLite directly, keep working unchanged until their own
+migration - see db/connection.py's module docstring. Production code (this
+project's CLI) always uses the Postgres mode.
 
 Two things the CSV format does not capture, by design of the current
 template (see data/templates/hand_log_template_GUIDE.md), and how this
@@ -31,9 +38,14 @@ import csv
 import re
 import sqlite3
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Union
 
+import psycopg
+
+from poker_analyzer.db.connection import get_connection
 from poker_analyzer.validation.validator import validate_hand_log_csv
+
+Connection = Union[sqlite3.Connection, psycopg.Connection]
 
 ACTION_TOKEN_RE = re.compile(
     r"^(?P<position>[A-Za-z0-9+]+):(?P<type>fold|check|call|bet|raise|allin)(?P<amount>\d+(?:\.\d+)?)?$"
@@ -54,6 +66,18 @@ _PREFLOP_STARTING_BET_BB = 1.0
 
 class IngestionError(Exception):
     pass
+
+
+def _connect(sqlite_db_path: str | Path | None) -> Connection:
+    if sqlite_db_path is not None:
+        conn = sqlite3.connect(sqlite_db_path)
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
+    return get_connection()
+
+
+def _placeholder(conn: Connection) -> str:
+    return "?" if isinstance(conn, sqlite3.Connection) else "%s"
 
 
 def _big_blind_cents_from_stakes(stakes: str) -> int:
@@ -122,14 +146,15 @@ def _parse_action_string(action_str: str, street: str) -> list[dict]:
 
 
 def _get_or_create_session(
-    conn: sqlite3.Connection,
+    conn: Connection,
     session_date: str,
     location: str,
     stakes: str,
     buy_in_cents_default: int,
 ) -> int:
+    p = _placeholder(conn)
     cur = conn.execute(
-        "SELECT session_id FROM sessions WHERE session_date = ? AND location = ? AND stakes = ?",
+        f"SELECT session_id FROM sessions WHERE session_date = {p} AND location = {p} AND stakes = {p}",
         (session_date, location, stakes),
     )
     row = cur.fetchone()
@@ -143,62 +168,69 @@ def _get_or_create_session(
             f"{session_date} {location} {stakes} with buy_in_cents=0. "
             f"Update this later once real buy-in is tracked."
         )
-    cur = conn.execute(
-        """
-        INSERT INTO sessions (session_date, location, stakes, big_blind_cents, buy_in_cents)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (session_date, location, stakes, big_blind_cents, buy_in_cents_default),
+    insert_sql = (
+        f"INSERT INTO sessions (session_date, location, stakes, big_blind_cents, buy_in_cents) "
+        f"VALUES ({p}, {p}, {p}, {p}, {p})"
     )
-    return cur.lastrowid
+    params = (session_date, location, stakes, big_blind_cents, buy_in_cents_default)
+    if isinstance(conn, sqlite3.Connection):
+        cur = conn.execute(insert_sql, params)
+        return cur.lastrowid
+    cur = conn.execute(insert_sql + " RETURNING session_id", params)
+    return cur.fetchone()[0]
 
 
-def _insert_hand(conn: sqlite3.Connection, session_id: int, row: dict) -> int | None:
+def _insert_hand(conn: Connection, session_id: int, row: dict) -> int | None:
     """Returns the new hand_id, or None if this hand was already loaded (idempotent)."""
+    p = _placeholder(conn)
     existing = conn.execute(
-        "SELECT hand_id FROM hands WHERE session_id = ? AND hand_number = ?",
+        f"SELECT hand_id FROM hands WHERE session_id = {p} AND hand_number = {p}",
         (session_id, int(row["hand_number"])),
     ).fetchone()
     if existing:
         return None
 
-    cur = conn.execute(
-        """
-        INSERT INTO hands (
-            session_id, hand_number, hero_position, hero_hole_cards, num_players,
-            effective_stack_bb, board_flop, board_turn, board_river,
-            pot_size_bb, result_bb, went_to_showdown, notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            session_id,
-            int(row["hand_number"]),
-            row["hero_position"],
-            row["hero_hole_cards"],
-            int(row["num_players"]),
-            float(row["effective_stack_bb"]) if row["effective_stack_bb"] else None,
-            row["flop_cards"] or None,
-            row["turn_card"] or None,
-            row["river_card"] or None,
-            float(row["pot_size_bb"]) if row["pot_size_bb"] else None,
-            float(row["result_bb"]) if row["result_bb"] else None,
-            int(row["went_to_showdown"]),
-            row["notes"] or None,
-        ),
+    insert_sql = (
+        "INSERT INTO hands ("
+        "session_id, hand_number, hero_position, hero_hole_cards, num_players, "
+        "effective_stack_bb, board_flop, board_turn, board_river, "
+        "pot_size_bb, result_bb, went_to_showdown, notes"
+        f") VALUES ({', '.join([p] * 13)})"
     )
-    return cur.lastrowid
+    params = (
+        session_id,
+        int(row["hand_number"]),
+        row["hero_position"],
+        row["hero_hole_cards"],
+        int(row["num_players"]),
+        float(row["effective_stack_bb"]) if row["effective_stack_bb"] else None,
+        row["flop_cards"] or None,
+        row["turn_card"] or None,
+        row["river_card"] or None,
+        float(row["pot_size_bb"]) if row["pot_size_bb"] else None,
+        float(row["result_bb"]) if row["result_bb"] else None,
+        int(row["went_to_showdown"]),
+        row["notes"] or None,
+    )
+    if isinstance(conn, sqlite3.Connection):
+        cur = conn.execute(insert_sql, params)
+        return cur.lastrowid
+    cur = conn.execute(insert_sql + " RETURNING hand_id", params)
+    return cur.fetchone()[0]
 
 
-def _insert_actions(conn: sqlite3.Connection, hand_id: int, row: dict) -> None:
+def _insert_actions(conn: Connection, hand_id: int, row: dict) -> None:
+    p = _placeholder(conn)
+    insert_sql = (
+        "INSERT INTO actions ("
+        "hand_id, street, action_order, actor_position, "
+        "action_type, amount_bb, pot_before_bb"
+        f") VALUES ({', '.join([p] * 7)})"
+    )
     for street, column in STREET_COLUMNS.items():
         for action in _parse_action_string(row[column], street):
             conn.execute(
-                """
-                INSERT INTO actions (
-                    hand_id, street, action_order, actor_position,
-                    action_type, amount_bb, pot_before_bb
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
+                insert_sql,
                 (
                     hand_id,
                     action["street"],
@@ -213,11 +245,15 @@ def _insert_actions(conn: sqlite3.Connection, hand_id: int, row: dict) -> None:
 
 def load_hand_log_csv(
     csv_path: str | Path,
-    db_path: str | Path,
+    sqlite_db_path: str | Path | None = None,
     buy_in_cents_default: int = 0,
 ) -> dict:
     """
-    Parse -> validate -> load a hand-log CSV into the SQLite database.
+    Parse -> validate -> load a hand-log CSV into the database.
+
+    Writes to Postgres (SUPABASE_DB_URL) unless sqlite_db_path is given, in
+    which case it writes to that local SQLite file instead (see module
+    docstring for why that mode exists).
 
     Returns a summary dict: {"hands_loaded": int, "hands_skipped": int,
     "sessions_created": int}. Skipped hands are ones already present
@@ -231,8 +267,7 @@ def load_hand_log_csv(
             "CSV failed validation, fix these before ingesting:\n" + "\n".join(f"  - {e}" for e in errors)
         )
 
-    conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA foreign_keys = ON")
+    conn = _connect(sqlite_db_path)
 
     hands_loaded = 0
     hands_skipped = 0
@@ -270,9 +305,14 @@ def load_hand_log_csv(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Ingest a validated hand-log CSV into the SQLite database")
+    parser = argparse.ArgumentParser(description="Ingest a validated hand-log CSV into the database")
     parser.add_argument("csv_path", type=Path, help="Path to the hand log CSV to ingest")
-    parser.add_argument("--db", default="poker_hands.db", help="Path to the SQLite database (default: poker_hands.db)")
+    parser.add_argument(
+        "--db",
+        default=None,
+        help="Path to a local SQLite database file. Omit to ingest into Postgres "
+        "(SUPABASE_DB_URL) instead.",
+    )
     parser.add_argument(
         "--buy-in-cents",
         type=int,

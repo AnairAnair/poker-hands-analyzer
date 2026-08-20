@@ -1,25 +1,24 @@
--- Poker Hand Analyzer - Postgres schema (hosted on Supabase)
+-- Poker Hand Analyzer - legacy SQLite schema.
+--
+-- schema.sql (this directory) is now the real/production schema, adapted
+-- for Postgres. This file is the original SQLite version, kept only so
+-- init_db()/load_hand_log_csv() can still build a local SQLite fixture
+-- database when given an explicit path - stats/ev/leaks/dashboard (and
+-- their tests) still read local SQLite directly and haven't been migrated
+-- yet. Delete this file once those are migrated too.
 --
 -- Three normalized tables, per the project spec's storage section:
 --   sessions -> hands -> actions  (one-to-many, one-to-many)
---
--- This file defines structure only. No data is loaded here except by the
--- one-time migration script (see db/migrate_to_postgres.py) that moved the
--- real local SQLite data over.
---
--- Originally SQLite, ported to Postgres with SERIAL replacing
--- AUTOINCREMENT and datetime('now') replaced by now(), since foreign keys
--- are enforced by default in Postgres (no PRAGMA needed) and everything
--- else here (TEXT, INTEGER, REAL, CHECK, UNIQUE, REFERENCES ... ON DELETE
--- CASCADE) is valid unchanged. Table/column structure is unchanged.
 --
 -- Money/stakes are stored in big blinds (REAL) rather than dollars, since bb
 -- is the unit win-rate and EV analysis will actually use. Session buy-in/
 -- cash-out are stored in cents (INTEGER) to avoid floating point rounding.
 
+PRAGMA foreign_keys = ON;
+
 -- One row per live session played.
 CREATE TABLE IF NOT EXISTS sessions (
-    session_id      SERIAL PRIMARY KEY,
+    session_id      INTEGER PRIMARY KEY AUTOINCREMENT,
     session_date    TEXT NOT NULL,              -- ISO 8601 date, e.g. '2026-08-05'
     location        TEXT NOT NULL,              -- e.g. 'The Brook'
     game_type       TEXT NOT NULL DEFAULT 'NLHE',
@@ -30,12 +29,12 @@ CREATE TABLE IF NOT EXISTS sessions (
     start_time      TEXT,                       -- ISO 8601 timestamp
     end_time        TEXT,
     notes           TEXT,
-    created_at      TEXT NOT NULL DEFAULT (now()::text)
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- One row per hand played, linked to its session.
 CREATE TABLE IF NOT EXISTS hands (
-    hand_id             SERIAL PRIMARY KEY,
+    hand_id             INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id          INTEGER NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
     hand_number          INTEGER NOT NULL,       -- sequence number within the session, starts at 1
     hero_position        TEXT NOT NULL,          -- BTN, SB, BB, UTG, UTG+1, MP, HJ, CO, ...
@@ -49,13 +48,13 @@ CREATE TABLE IF NOT EXISTS hands (
     result_bb             REAL,                   -- hero's net result for the hand, in bb (+/-)
     went_to_showdown      INTEGER NOT NULL DEFAULT 0 CHECK (went_to_showdown IN (0, 1)),
     notes                 TEXT,
-    created_at            TEXT NOT NULL DEFAULT (now()::text),
+    created_at            TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (session_id, hand_number)
 );
 
 -- One row per action taken during a hand (by any player at the table hero can see the action for).
 CREATE TABLE IF NOT EXISTS actions (
-    action_id       SERIAL PRIMARY KEY,
+    action_id       INTEGER PRIMARY KEY AUTOINCREMENT,
     hand_id         INTEGER NOT NULL REFERENCES hands(hand_id) ON DELETE CASCADE,
     street          TEXT NOT NULL CHECK (street IN ('preflop', 'flop', 'turn', 'river')),
     action_order     INTEGER NOT NULL,           -- 1-based order of this action within the street
@@ -63,7 +62,7 @@ CREATE TABLE IF NOT EXISTS actions (
     action_type      TEXT NOT NULL CHECK (action_type IN ('fold', 'check', 'call', 'bet', 'raise')),
     amount_bb        REAL,                       -- size of the bet/raise/call, in bb (NULL for fold/check)
     pot_before_bb    REAL,                       -- pot size immediately before this action, in bb
-    created_at       TEXT NOT NULL DEFAULT (now()::text),
+    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (hand_id, street, action_order)
 );
 

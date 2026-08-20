@@ -54,14 +54,13 @@ def validate(
 @app.command()
 def ingest(
     csv_path: Path = typer.Argument(..., help="Path to the hand log CSV to ingest"),
-    db: str = typer.Option(DEFAULT_DB_PATH, "--db", help="Path to the SQLite database"),
     buy_in_cents: int = typer.Option(
         0, "--buy-in-cents", help="Buy-in in cents to use for any NEW session created during this run"
     ),
 ) -> None:
-    """Validate then ingest a hand-log CSV into the SQLite database."""
+    """Validate then ingest a hand-log CSV into the Postgres database (SUPABASE_DB_URL)."""
     try:
-        summary = load_hand_log_csv(csv_path, db, buy_in_cents)
+        summary = load_hand_log_csv(csv_path, buy_in_cents_default=buy_in_cents)
     except IngestionError as exc:
         typer.echo(f"Ingestion failed:\n{exc}")
         raise typer.Exit(code=1)

@@ -5,4 +5,9 @@ typer>=0.12             # CLI framework
 pytest>=8.0
 streamlit>=1.35         # dashboard (dashboard/app.py); ships altair, used for charts
 
-# SQLite is part of the Python standard library (sqlite3) - no package needed.
+# init_db.py and ingestion/loader.py talk to the hosted Supabase Postgres
+# database (SUPABASE_DB_URL) via db/connection.py. stats/ev/leaks/dashboard
+# still read local SQLite directly (sqlite3, stdlib) pending their own
+# migration - see db/connection.py's module docstring.
+psycopg[binary]>=3.2
+python-dotenv>=1.0

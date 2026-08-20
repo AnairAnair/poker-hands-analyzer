@@ -1,9 +1,29 @@
+import uuid
 from pathlib import Path
 
+import psycopg
 import pytest
 
+from poker_analyzer.db.connection import get_connection, get_db_url
 from poker_analyzer.db.init_db import init_db
 from poker_analyzer.ingestion.loader import IngestionError, load_hand_log_csv
+
+
+@pytest.fixture(autouse=True)
+def isolated_pg_schema(monkeypatch):
+    """
+    Point every test in this file at a throwaway, uniquely-named Postgres
+    schema instead of the real 'poker_analyzer' schema - so this suite never
+    reads or writes the real migrated hand history in Supabase. Dropped
+    again once the test finishes.
+    """
+    schema = f"test_ingestion_{uuid.uuid4().hex[:12]}"
+    monkeypatch.setenv("POKER_ANALYZER_PG_SCHEMA", schema)
+    yield
+    conn = psycopg.connect(get_db_url())
+    conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+    conn.commit()
+    conn.close()
 
 
 EXPECTED_COLUMNS = [
@@ -35,28 +55,25 @@ def _write_csv(tmp_path: Path, rows: list[str]) -> Path:
     return path
 
 
-def test_loads_template_csv_into_fresh_db(tmp_path):
-    db_path = tmp_path / "poker.db"
-    init_db(db_path)
+def test_loads_template_csv_into_fresh_db():
+    init_db()
 
-    summary = load_hand_log_csv(Path("data/templates/hand_log_template.csv"), db_path)
+    summary = load_hand_log_csv(Path("data/templates/hand_log_template.csv"))
 
     assert summary == {"hands_loaded": 2, "hands_skipped": 0, "sessions_created": 1}
 
 
-def test_reruns_are_idempotent(tmp_path):
-    db_path = tmp_path / "poker.db"
-    init_db(db_path)
-    load_hand_log_csv(Path("data/templates/hand_log_template.csv"), db_path)
+def test_reruns_are_idempotent():
+    init_db()
+    load_hand_log_csv(Path("data/templates/hand_log_template.csv"))
 
-    summary = load_hand_log_csv(Path("data/templates/hand_log_template.csv"), db_path)
+    summary = load_hand_log_csv(Path("data/templates/hand_log_template.csv"))
 
     assert summary == {"hands_loaded": 0, "hands_skipped": 2, "sessions_created": 0}
 
 
 def test_same_session_triple_reuses_session_row(tmp_path):
-    db_path = tmp_path / "poker.db"
-    init_db(db_path)
+    init_db()
     csv_path = _write_csv(
         tmp_path,
         [
@@ -65,32 +82,29 @@ def test_same_session_triple_reuses_session_row(tmp_path):
         ],
     )
 
-    summary = load_hand_log_csv(csv_path, db_path)
+    summary = load_hand_log_csv(csv_path)
 
     assert summary["sessions_created"] == 1
     assert summary["hands_loaded"] == 2
 
 
 def test_rejects_invalid_csv_without_writing_anything(tmp_path):
-    db_path = tmp_path / "poker.db"
-    init_db(db_path)
+    init_db()
     csv_path = _write_csv(
         tmp_path,
         ["2026-08-05,The Brook,1/3,1,6,CO,Ah 10d,100,UTG:fold,,,,,,,10,5,0,"],
     )
 
     with pytest.raises(IngestionError):
-        load_hand_log_csv(csv_path, db_path)
+        load_hand_log_csv(csv_path)
 
-    import sqlite3
-
-    conn = sqlite3.connect(db_path)
+    conn = get_connection()
     assert conn.execute("SELECT COUNT(*) FROM hands").fetchone()[0] == 0
+    conn.close()
 
 
 def test_action_strings_parsed_into_actions_table(tmp_path):
-    db_path = tmp_path / "poker.db"
-    init_db(db_path)
+    init_db()
     csv_path = _write_csv(
         tmp_path,
         [
@@ -99,14 +113,13 @@ def test_action_strings_parsed_into_actions_table(tmp_path):
         ],
     )
 
-    load_hand_log_csv(csv_path, db_path)
+    load_hand_log_csv(csv_path)
 
-    import sqlite3
-
-    conn = sqlite3.connect(db_path)
+    conn = get_connection()
     actions = conn.execute(
         "SELECT street, actor_position, action_type, amount_bb FROM actions ORDER BY street, action_order"
     ).fetchall()
+    conn.close()
     assert ("preflop", "UTG", "fold", None) in actions
     assert ("preflop", "CO", "raise", 2.5) in actions
     assert ("flop", "CO", "bet", 4.0) in actions
@@ -119,8 +132,7 @@ def test_allin_tokens_classified_by_amount_vs_current_bet(tmp_path):
     is a 'bet', exceeding an existing bet is a 'raise', and shoving for at or below
     the current bet (a covered call-for-less) is a 'call'.
     """
-    db_path = tmp_path / "poker.db"
-    init_db(db_path)
+    init_db()
     csv_path = _write_csv(
         tmp_path,
         [
@@ -129,14 +141,13 @@ def test_allin_tokens_classified_by_amount_vs_current_bet(tmp_path):
         ],
     )
 
-    load_hand_log_csv(csv_path, db_path)
+    load_hand_log_csv(csv_path)
 
-    import sqlite3
-
-    conn = sqlite3.connect(db_path)
+    conn = get_connection()
     actions = conn.execute(
         "SELECT street, actor_position, action_type, amount_bb FROM actions ORDER BY street, action_order"
     ).fetchall()
+    conn.close()
     # Preflop: CO's allin (50) exceeds UTG's raise (4) -> raise.
     assert ("preflop", "CO", "raise", 50.0) in actions
     # Flop: CO's first allin (20) opens from a check -> bet.

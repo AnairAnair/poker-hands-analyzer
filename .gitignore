@@ -21,3 +21,5 @@ data/hand_logs/*.csv
 .DS_Store
 .vscode/
 .idea/
+
+.env
