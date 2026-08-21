@@ -1,11 +1,10 @@
 -- Poker Hand Analyzer - legacy SQLite schema.
 --
 -- schema.sql (this directory) is now the real/production schema, adapted
--- for Postgres. This file is the original SQLite version, kept only so
--- init_db()/load_hand_log_csv() can still build a local SQLite fixture
--- database when given an explicit path - stats/ev/leaks/dashboard (and
--- their tests) still read local SQLite directly and haven't been migrated
--- yet. Delete this file once those are migrated too.
+-- for Postgres. This file is the original SQLite version, kept permanently
+-- as the SQLite dialect for init_db()/load_hand_log_csv()'s dual-mode
+-- fixture support (test suites and any explicit local-path escape hatch) -
+-- not a migration leftover to be deleted.
 --
 -- Three normalized tables, per the project spec's storage section:
 --   sessions -> hands -> actions  (one-to-many, one-to-many)
