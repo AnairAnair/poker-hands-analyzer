@@ -40,12 +40,42 @@ import streamlit as st
 
 from poker_analyzer.dashboard.data_prep import (
     PREFLOP_FLAG_ORDER,
+    preflop_data_fingerprint,
     preflop_decisions_dataframe,
     preflop_flag_counts,
     results_over_time,
     session_summary_table,
 )
 from poker_analyzer.ev.engine import DEFAULT_TRIALS_PER_COMBO
+
+
+@st.cache_data(show_spinner="Running the preflop EV engine (Monte Carlo equity simulation)...")
+def _cached_preflop_decisions_dataframe(
+    db_path: str | None, trials_per_combo: int, seed: int | None, data_fingerprint: tuple[int, int, int]
+) -> pd.DataFrame:
+    """
+    Cache wrapper around data_prep.preflop_decisions_dataframe, the thing that actually
+    runs the Monte Carlo simulation - one dashboard page load was taking upwards of a
+    minute against the real 64-hand database and blocking the whole process (even
+    unrelated static file requests) while it ran, since it recomputed from scratch on
+    every reload.
+
+    Lives here, not in data_prep.py: caching is a dashboard rendering-layer concern
+    (st.cache_data is a Streamlit API), and data_prep.py is deliberately kept
+    Streamlit-free so it stays testable with plain pytest (see its test file) - the
+    boundary this file's own docstring already draws ("this file renders; it does not
+    calculate").
+
+    Cache key is (db_path, trials_per_combo, seed, data_fingerprint) - the exact inputs
+    that can change the result. `data_fingerprint` (from preflop_data_fingerprint) is a
+    cheap COUNT/MAX read of the hands/actions tables; passing it in as an argument means
+    Streamlit's own key hashing handles invalidation for us - a fresh fingerprint after
+    new hands are ingested is a cache miss, an unchanged fingerprint is a hit. See the
+    "Force refresh" button below for the escape hatch this doesn't cover (data edited
+    in place rather than appended).
+    """
+    return preflop_decisions_dataframe(db_path, trials_per_combo=trials_per_combo, seed=seed)
+
 
 # Reserved status hues (not generic categorical colors) - +EV/-EV/marginal/baseline are
 # quality judgments on a decision, not arbitrary series identities, so they get the
@@ -109,6 +139,14 @@ with st.sidebar:
         "Use fixed seed", value=True, help="Uncheck for a fresh random simulation each run."
     )
     seed = st.number_input("Seed", min_value=0, value=0, step=1, disabled=not use_seed)
+    if st.button(
+        "Force refresh EV cache",
+        help="The preflop EV breakdown below is cached and normally re-runs itself "
+        "automatically when new hands are ingested. Click this only if you've edited "
+        "existing hand/action data in place (rather than adding new hands) and the "
+        "breakdown looks stale.",
+    ):
+        _cached_preflop_decisions_dataframe.clear()
 
 if db_path is not None and not Path(db_path).exists():
     st.error(
@@ -189,12 +227,12 @@ else:
 
 st.header("Preflop decisions: +EV / -EV / marginal")
 
-with st.spinner("Running the preflop EV engine (Monte Carlo equity simulation)..."):
-    decisions_df = preflop_decisions_dataframe(
-        db_path,
-        trials_per_combo=int(trials),
-        seed=int(seed) if use_seed else None,
-    )
+decisions_df = _cached_preflop_decisions_dataframe(
+    db_path,
+    int(trials),
+    int(seed) if use_seed else None,
+    preflop_data_fingerprint(db_path),
+)
 
 if decisions_df.empty:
     st.info("No preflop decisions found.")

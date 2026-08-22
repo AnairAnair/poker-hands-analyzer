@@ -147,6 +147,29 @@ def preflop_decisions_dataframe(
     return pd.DataFrame.from_records([asdict(decision) for decision in decisions], columns=columns)
 
 
+def preflop_data_fingerprint(db_path: str | Path | None = None) -> tuple[int, int, int]:
+    """
+    Cheap (indexed COUNT/MAX, not a scan of hand/action content) signal for whether the
+    hands/actions data `preflop_decisions_dataframe` reads has changed since it was last
+    computed: (hand_count, action_count, max_hand_id).
+
+    Relies on hands/actions being insert-only in this codebase (db/schema.sql has no
+    UPDATE/DELETE anywhere - see ingestion/loader.py) - a new value here means new hands
+    were ingested, not that some existing hand's content changed in place. The dashboard
+    (app.py) uses this as a cache key alongside trials/seed so a page reload with no new
+    data returns the already-computed result instead of rerunning the Monte Carlo sim.
+    """
+    conn = _connect(db_path)
+    try:
+        hand_count, max_hand_id = conn.execute(
+            "SELECT COUNT(*), COALESCE(MAX(hand_id), 0) FROM hands"
+        ).fetchone()
+        (action_count,) = conn.execute("SELECT COUNT(*) FROM actions").fetchone()
+    finally:
+        conn.close()
+    return (int(hand_count), int(action_count), int(max_hand_id))
+
+
 def preflop_flag_counts(decisions_df: pd.DataFrame) -> pd.DataFrame:
     """
     Count of preflop decisions per flag (+EV/-EV/marginal/baseline), in a fixed display
