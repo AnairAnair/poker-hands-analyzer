@@ -60,7 +60,7 @@ LINE_COLOR = "#2a78d6"  # single-series categorical slot 1 (blue)
 ZERO_LINE_COLOR = "#c3c2b7"
 
 st.set_page_config(
-    page_title="Poker Hand Analyzer",
+    page_title="DeepStack",
     page_icon=str(ASSETS_DIR / "icon-32.png"),
     layout="wide",
 )
