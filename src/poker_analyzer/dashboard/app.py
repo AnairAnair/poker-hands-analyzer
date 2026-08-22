@@ -32,6 +32,8 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+
 import altair as alt
 import pandas as pd
 import streamlit as st
@@ -57,7 +59,32 @@ FLAG_COLORS = {
 LINE_COLOR = "#2a78d6"  # single-series categorical slot 1 (blue)
 ZERO_LINE_COLOR = "#c3c2b7"
 
-st.set_page_config(page_title="Poker Hand Analyzer", layout="wide")
+st.set_page_config(
+    page_title="Poker Hand Analyzer",
+    page_icon=str(ASSETS_DIR / "icon-32.png"),
+    layout="wide",
+)
+
+# Streamlit's page_icon (above) only sets the browser-tab favicon - it has no
+# option for the iOS/Android "Add to Home Screen" icon, which browsers look
+# for as a <link rel="apple-touch-icon"> tag in <head>. Streamlit doesn't
+# expose an API for adding arbitrary <head> tags, so this injects one
+# directly via st.markdown(unsafe_allow_html=True), the standard workaround
+# for this in Streamlit apps.
+#
+# The href points at a real served file rather than a base64 data URI -
+# iOS Safari has been observed to ignore base64-inlined apple-touch-icon
+# links, only honoring an actual file path. The file (dashboard/static/
+# icon-180.png) is served by Streamlit's app-static-file feature, which
+# must be turned on explicitly via `server.enableStaticServing = true` in
+# .streamlit/config.toml (off by default) and only serves files placed in a
+# `static/` folder next to this script, at the fixed URL path
+# "app/static/<filename>" - see .streamlit/config.toml for more.
+st.markdown(
+    '<link rel="apple-touch-icon" sizes="180x180" href="app/static/icon-180.png">',
+    unsafe_allow_html=True,
+)
+
 st.title("Poker Hand Analyzer")
 
 with st.sidebar:

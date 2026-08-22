@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Poker Hand Analyzer dashboard icon: a dark poker chip with a white spade
+  centered on it. This is the canonical vector design - scripts/generate_dashboard_icon.py
+  rasterizes the same geometry (same coordinates/colors) to the PNG sizes the
+  dashboard actually serves (32x32 favicon, 180x180 apple-touch-icon), since the
+  project has no SVG-to-PNG rasterizer dependency. Edit both files together if the
+  design changes.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- Chip body -->
+  <circle cx="50" cy="50" r="48" fill="#1a1a1a" />
+
+  <!-- Edge notches (8, evenly spaced). Each rect's own center sits at radius
+       41 from the chip center (50 - (4 + 9/2) = 41), landing the notch band
+       just inside the chip's r=48 outer edge. -->
+  <g fill="#ffffff">
+    <rect x="46" y="4" width="8" height="9" rx="2" transform="rotate(0 50 50)" />
+    <rect x="46" y="4" width="8" height="9" rx="2" transform="rotate(45 50 50)" />
+    <rect x="46" y="4" width="8" height="9" rx="2" transform="rotate(90 50 50)" />
+    <rect x="46" y="4" width="8" height="9" rx="2" transform="rotate(135 50 50)" />
+    <rect x="46" y="4" width="8" height="9" rx="2" transform="rotate(180 50 50)" />
+    <rect x="46" y="4" width="8" height="9" rx="2" transform="rotate(225 50 50)" />
+    <rect x="46" y="4" width="8" height="9" rx="2" transform="rotate(270 50 50)" />
+    <rect x="46" y="4" width="8" height="9" rx="2" transform="rotate(315 50 50)" />
+  </g>
+
+  <!-- Mask covering the inner ends of the notches, leaving just a rim tick -->
+  <circle cx="50" cy="50" r="39" fill="#1a1a1a" />
+
+  <!-- Spade: triangle top + two round lobes + tapered stem, all unioned by fill -->
+  <g fill="#ffffff">
+    <polygon points="50,24 28,58 72,58" />
+    <circle cx="37" cy="54" r="15" />
+    <circle cx="63" cy="54" r="15" />
+    <polygon points="50,56 42,82 58,82" />
+  </g>
+</svg>

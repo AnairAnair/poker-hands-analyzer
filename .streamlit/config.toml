@@ -1,0 +1,7 @@
+[server]
+# Serves files from dashboard/static/ at the URL path "app/static/<file>".
+# Needed so app.py can point the apple-touch-icon <link> tag at a real file
+# path instead of an inlined base64 data URI - iOS Safari has been observed
+# to ignore base64-inlined apple-touch-icon links. See app.py's page_config
+# section for where this is used.
+enableStaticServing = true
